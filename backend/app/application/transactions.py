@@ -147,6 +147,17 @@ def system_error(code: str, message: str, retryable: bool) -> dict:
     return {"error_code": code, "error_message": message, "error_category": "SYSTEM_ERROR", "retryable": retryable}
 
 
+def apply_method_result(repo: TransactionRepository, transaction_id: UUID, terminal_id: UUID,
+                        result: MethodResult) -> dict:
+    """The one place an asynchronous method result becomes a transaction state.
+
+    The polling fallback uses it now, and the webhook handler will in Step 10B, so both go through the same
+    repository call as the synchronous path — same audit row, same webhook outbox, same idempotency handling.
+    An adapter never writes state itself; it reports, and this decides.
+    """
+    return repo.finish(transaction_id, terminal_id, result, result.status, result.error, store_response=True)
+
+
 @dataclass
 class TransactionService:
     repo: TransactionRepository

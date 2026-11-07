@@ -90,10 +90,10 @@ class BaseMethodAdapter(ABC):
     def capture(self, transaction_id: UUID, amount: int) -> MethodResult:
         raise UnsupportedOperation(f"{self.method} has no capture step yet")
 
-    def refund(self, transaction_id: UUID, amount: int) -> MethodResult:
+    def refund(self, transaction_id: UUID, amount: int, reference: str | None = None) -> MethodResult:
         raise UnsupportedOperation(f"{self.method} has no refund step yet")
 
-    def status(self, transaction_id: UUID) -> MethodResult:
+    def status(self, transaction_id: UUID, reference: str | None = None) -> MethodResult:
         raise UnsupportedOperation(f"{self.method} has no status lookup yet")
 
     def handle_webhook(self, payload: dict) -> MethodResult:

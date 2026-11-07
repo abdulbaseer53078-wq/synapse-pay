@@ -142,6 +142,20 @@ class PostgresTransactionRepository:
                      " WHERE intent_id = %s", (txn.payment_intent_id,))
         return None
 
+    def stale_pending(self, method: str, older_than_seconds: int,
+                      limit: int = 50) -> list[tuple[UUID, UUID, str | None]]:
+        """(transaction_id, terminal_id, method_reference) for payments a rail left PENDING too long.
+
+        The polling fallback's query: a UPI collect that never got its webhook. Indexed by
+        transactions_pending_idx (status) plus the method filter.
+        """
+        with self.pool.connection() as conn:
+            return conn.execute(
+                "SELECT transaction_id, terminal_id, method_reference FROM transactions"
+                " WHERE payment_method = %s AND status = 'PENDING'"
+                " AND updated_at < now() - make_interval(secs => %s)"
+                " ORDER BY updated_at LIMIT %s", (method, older_than_seconds, limit)).fetchall()
+
     def mark_pending(self, transaction_id: UUID, terminal_id: UUID) -> None:
         with self.pool.connection() as conn, conn.transaction():
             conn.execute("UPDATE transactions SET status = 'PENDING', updated_at = now() WHERE transaction_id = %s",

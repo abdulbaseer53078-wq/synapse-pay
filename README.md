@@ -76,10 +76,11 @@ The target design. What exists today is listed under Current status.
 | Android SDK, Flutter plugin | 🟡 Step 6: written; Java core tested, Kotlin/Flutter not compiled yet |
 | Append-only audit log: hash chain, WORM storage, PAN masking, query API | ✅ Step 7 (`backend/app/audit/`, `infra/`; spec 1.4.0) |
 | Payment method adapters (method-agnostic transaction engine) | ✅ Step 8 (`backend/app/application/methods.py`, `backend/app/infrastructure/methods/`) |
+| UPI adapter + mock PSP (collect, status, refund, polling fallback) | ✅ Step 10A (`backend/app/infrastructure/methods/upi.py`, `mock-psp/`) |
 
 **Try it:** [take a test payment in 5 minutes](docs/quickstart.md).
 
-How it works: [terminal payments (Step 5)](docs/step5.md), [merchant SDKs (Step 6)](docs/step6.md), [the audit log (Step 7)](docs/step7.md), [payment method adapters (Step 8)](docs/step8.md).
+How it works: [terminal payments (Step 5)](docs/step5.md), [merchant SDKs (Step 6)](docs/step6.md), [the audit log (Step 7)](docs/step7.md), [payment method adapters (Step 8)](docs/step8.md), [UPI (Step 10A)](docs/step10a.md).
 
 ## The contract
 

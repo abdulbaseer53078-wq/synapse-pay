@@ -173,10 +173,11 @@ class PaymentMethodAdapter(Protocol):
     def capture(self, transaction_id: UUID, amount: int) -> MethodResult:
         """Capture a previously authorized payment. Raise UnsupportedOperation if the method cannot."""
 
-    def refund(self, transaction_id: UUID, amount: int) -> MethodResult:
-        """Refund all or part of a payment."""
+    def refund(self, transaction_id: UUID, amount: int, reference: str | None = None) -> MethodResult:
+        """Refund all or part of a payment. `reference` is the network's id, as the engine stored it —
+        adapters are stateless and cannot look it up."""
 
-    def status(self, transaction_id: UUID) -> MethodResult:
+    def status(self, transaction_id: UUID, reference: str | None = None) -> MethodResult:
         """Ask the network for the authoritative status (reconciliation, stuck payments)."""
 
     def handle_webhook(self, payload: dict) -> MethodResult:
