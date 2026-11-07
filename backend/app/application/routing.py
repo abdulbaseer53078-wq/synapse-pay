@@ -105,7 +105,12 @@ def cascade(hosts: Iterable[str], attempt: Callable[[str], MethodResult],
     for index, host in enumerate(list(hosts)[: max_retries + 1]):
         result = attempt(host)
         last = result
-        retryable = bool(result.error and result.error.get("retryable")) or result.status == "PENDING"
+        # PENDING is two different situations. With a next_action the customer is mid-flow (a UPI collect is
+        # ringing their phone): retrying would send a second collect and they would see two PIN prompts. Without
+        # one, nobody knows what happened — the provider may have timed out after sending — so the backup is the
+        # only way the payment still happens.
+        retryable = bool(result.error and result.error.get("retryable")) or (
+            result.status == "PENDING" and result.next_action is None)
         trail.append({"host": host, "status": result.status, "retryable": retryable,
                       "error": (result.error or {}).get("error_code")})
         if not retryable:
