@@ -112,6 +112,7 @@ class NewTransaction:
     metadata: dict[str, str]
     webhook_url: str | None = None
     payment_intent_id: UUID | None = None  # set: this payment completes a terminal checkout (Step 6)
+    qr_encoded_rail: str | None = None  # set for QR: the rail the code actually encodes (Step 11)
 
 
 @dataclass(frozen=True)
@@ -190,7 +191,8 @@ class TransactionService:
             terminal_id=caller_terminal, amount=body["amount"], currency=body["currency"],
             payment_method=body["payment_method"], capture_mode=body.get("capture_mode", "AUTO"),
             card_network=details.get("card_network"), metadata=body.get("metadata") or {},
-            webhook_url=body.get("webhook_url"), payment_intent_id=intent_id)
+            webhook_url=body.get("webhook_url"), payment_intent_id=intent_id,
+            qr_encoded_rail=details.get("qr_encoded_rail"))
 
         claim = self.repo.claim(txn)
         if claim.intent_error:

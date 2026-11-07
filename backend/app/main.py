@@ -22,6 +22,7 @@ from app.config import Settings
 from app.infrastructure.config_certification import ConfigCertificationRegistry
 from app.infrastructure.file_ca import FileCertificateAuthority
 from app.infrastructure.methods.card import CardMethodAdapter
+from app.infrastructure.methods.qr import QrMethodAdapter
 from app.infrastructure.methods.upi import UpiMethodAdapter
 from app.infrastructure.upi_client import HttpUpiPsp
 from app.infrastructure.card_service_client import HttpCardProcessor
@@ -80,7 +81,9 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     cards = cards or HttpCardProcessor(settings.card_service_url)
     # Step 8: the one place a rail is chosen. Adding UPI was one line here and a module beside card.py.
     upi = UpiMethodAdapter(HttpUpiPsp(settings.upi_psp_url), webhook_secret=settings.upi_webhook_secret or None)
-    methods = MethodRegistry([CardMethodAdapter(cards), upi])
+    # QR is a router: it dispatches to the rails above, so it is registered alongside them rather than instead.
+    rails = MethodRegistry([CardMethodAdapter(cards), upi])
+    methods = MethodRegistry([*rails.adapters(), QrMethodAdapter(rails)])
     app.state.methods = methods
     transaction_repo = PostgresTransactionRepository(pool)
     app.state.transactions = TransactionService(transaction_repo, app.state.authorization, methods)
