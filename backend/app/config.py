@@ -34,6 +34,13 @@ class Settings:
     webhook_interval: float = 2.0
     # http:// webhook URLs: local development and tests only.
     allow_insecure_webhooks: bool = False
+    # Step 7 — audit log. `local` writes a WORM directory; `s3` uses S3 Object Lock (needs boto3).
+    audit_worm_backend: str = "local"
+    audit_worm_path: Path = Path("audit-worm")
+    audit_s3_bucket: str = ""
+    audit_s3_prefix: str = "audit"
+    audit_retention_days: int = 1825  # five years, per RBI
+    audit_alert_url: str = ""  # PagerDuty Events API v2 endpoint; empty disables alerting
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -50,4 +57,10 @@ class Settings:
             card_service_url=os.environ.get("CARD_SERVICE_URL", "http://127.0.0.1:7070"),
             webhook_interval=float(os.environ.get("WEBHOOK_INTERVAL_SECONDS", "2")),
             allow_insecure_webhooks=os.environ.get("ALLOW_INSECURE_WEBHOOKS") == "1",
+            audit_worm_backend=os.environ.get("AUDIT_WORM_BACKEND", "local"),
+            audit_worm_path=Path(os.environ.get("AUDIT_WORM_PATH", "audit-worm")),
+            audit_s3_bucket=os.environ.get("AUDIT_S3_BUCKET", ""),
+            audit_s3_prefix=os.environ.get("AUDIT_S3_PREFIX", "audit"),
+            audit_retention_days=int(os.environ.get("AUDIT_RETENTION_DAYS", "1825")),
+            audit_alert_url=os.environ.get("AUDIT_ALERT_WEBHOOK_URL", ""),
         )

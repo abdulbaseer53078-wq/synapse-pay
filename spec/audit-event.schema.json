@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synapsepay.dev/schemas/audit-event.schema.json",
+  "title": "AuditEvent",
+  "description": "The universal audit event (Stage 1, Step 7). Every component emits this envelope and nothing else, so one query answers 'what happened to this payment' across the SDK, the registry, the transaction engine and the host connector. On the wire it has the first seven fields; the stored form adds the chain position and hashes. Card data is never present: PANs are masked to their last four and secrets are removed before the record is hashed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "timestamp", "event_type", "actor", "entity_id", "correlation_id", "payload"],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Stable id of this event. At-least-once delivery means a consumer may see it twice; drop duplicates on this field."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the event happened: ISO-8601, UTC, millisecond precision (2026-11-07T10:00:01.123Z)."
+    },
+    "event_type": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+      "description": "UPPER_SNAKE_CASE. Terminal lifecycle (TERMINAL_CREATED, TERMINAL_REGISTERED, TERMINAL_ACTIVATED, TERMINAL_REJECTED, TERMINAL_SUSPENDED, TERMINAL_REINSTATED, TERMINAL_REVOKED, TERMINAL_DECOMMISSIONED, TERMINAL_FIRMWARE_CHANGED, TERMINAL_HEALTH_CHANGED), transaction lifecycle (TRANSACTION_INITIATED, TRANSACTION_SUBMITTED, TRANSACTION_PENDING, TRANSACTION_AUTHORIZED, TRANSACTION_CAPTURED, TRANSACTION_SETTLED, TRANSACTION_FAILED, TRANSACTION_VOIDED, TRANSACTION_REFUNDED), and ADMIN_ACCESS for audited admin reads. The pattern is open on purpose: a new component may add a type without a spec release. Key on the prefix, not an exhaustive enum.",
+      "examples": ["TRANSACTION_AUTHORIZED", "TERMINAL_SUSPENDED", "HOST_RESPONSE_RECEIVED"]
+    },
+    "actor": {
+      "type": "string",
+      "pattern": "^(system|(merchant|terminal|admin|sdk|host-connector):.+)$",
+      "description": "Who caused it: system, or <kind>:<id> — merchant:{merchant_id}, terminal:{terminal_id}, admin:{admin_id}, sdk:{merchant_id}, host-connector:{host}.",
+      "examples": ["terminal:9f1c2d7e-0000-4000-8000-000000000001", "merchant:0b2e4c11-1111-4000-8000-000000000002", "system"]
+    },
+    "entity_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "The transaction, terminal or merchant this event is about."
+    },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "The magic bullet: ties every event of one business action together across components. For a payment it is the transaction id, so one lookup returns the whole timeline in order."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Event-specific detail, plus previous_state/new_state when the event represents a transition. Never card data: PANs are masked to their last four and secrets (CVV, PIN block, encrypted card data, track data) are removed."
+    },
+    "schema_version": {
+      "const": "1.0"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Present on stored records only: position in the chain, 1-based and contiguous."
+    },
+    "prev_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Present on stored records only: hash of the previous record; 64 zeros at sequence 1."
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Present on stored records only: SHA-256(prev_hash + \"\\n\" + canonical JSON of this event)."
+    }
+  }
+}

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.3.0
+  version: 1.4.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
     goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions.
@@ -604,6 +604,77 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         5XX: { $ref: '#/components/responses/Error' }
+  /v1/audit/events:
+    get:
+      operationId: listAuditEvents
+      summary: Read the append-only audit log (Stage 1, Step 7)
+      description: >-
+        Every recorded event, oldest first, from the hash-chained audit log. One correlation_id returns the whole
+        story of one business action across components — a payment's id gives the request, terminal
+        authorization, host response and webhook in order — which is the support and dispute workflow. Read-only:
+        the log is append-only by database trigger, and each record carries its chain position, prev_hash and
+        hash so a client can verify what it received without trusting this API.
+      security: [{ OAuth2ClientCredentials: [audit:read] }]
+      parameters:
+        - name: correlation_id
+          in: query
+          description: The id tying one action's events together (a transaction id, for payments).
+          schema: { type: string, maxLength: 64 }
+        - name: entity_id
+          in: query
+          description: The entity the events are about (a transaction, terminal or merchant id).
+          schema: { type: string, maxLength: 64 }
+        - name: event_type
+          in: query
+          schema: { $ref: '#/components/schemas/AuditEvent/properties/event_type' }
+        - name: from
+          in: query
+          description: Events that occurred at or after this instant (inclusive).
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: Events that occurred at or before this instant (inclusive).
+          schema: { type: string, format: date-time }
+        - name: cursor
+          in: query
+          description: Pass next_cursor from the previous page; pages are ordered by sequence.
+          schema: { type: integer, minimum: 0 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+      responses:
+        '200':
+          description: A page of chained events, oldest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditPage' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  /v1/audit/chain:
+    get:
+      operationId: getAuditChainHead
+      summary: Current position of the audit hash chain
+      description: >-
+        The last sequence number and hash. Ops compare it with ingestion lag; external verifiers use it to
+        confirm the log they hold is not behind the platform's.
+      security: [{ OAuth2ClientCredentials: [audit:read] }]
+      responses:
+        '200':
+          description: The chain head.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sequence, hash]
+                additionalProperties: false
+                properties:
+                  sequence: { type: integer, minimum: 0 }
+                  hash: { type: string, pattern: '^[0-9a-f]{64}$' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
 components:
   requestBodies:
     StatusChange:
@@ -641,6 +712,7 @@ components:
             registry:write: Register and update terminals
             registry:admin: Platform-admin terminal operations (any merchant's terminals; reinstate)
             registry:authorize: Routing engine's per-transaction terminal authorization check
+            audit:read: Read the append-only audit log (support, compliance and dispute tooling)
     # Merchant server → cloud with a secret API key (1.3.0): Authorization: Bearer sk_test_...
     SecretKey:
       type: http
@@ -1002,6 +1074,60 @@ components:
           - { from: PENDING, to: FAILED }
           - { from: AUTHORIZED, to: SETTLED }
   schemas:
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      description: >-
+        The universal audit event (Stage 1, Step 7). Every component emits this same envelope, and the stored
+        form adds the chain position and hashes.
+      required: [sequence, event_id, timestamp, event_type, actor, entity_id, correlation_id, payload, prev_hash,
+                 hash]
+      properties:
+        sequence: { type: integer, minimum: 1, description: 'Position in the chain: 1-based, contiguous.' }
+        event_id: { type: string, format: uuid }
+        timestamp:
+          type: string
+          format: date-time
+          description: When it happened, millisecond precision, UTC.
+        event_type:
+          type: string
+          pattern: '^[A-Z][A-Z0-9_]{2,63}$'
+          description: >-
+            UPPER_SNAKE_CASE. Terminal lifecycle (TERMINAL_*), transaction lifecycle (TRANSACTION_*), ADMIN_ACCESS
+            for audited admin reads. New types may appear; key on the category prefix rather than an exhaustive
+            list.
+          examples: [TRANSACTION_AUTHORIZED, TERMINAL_SUSPENDED]
+        actor:
+          type: string
+          pattern: '^(system|(merchant|terminal|admin|sdk|host-connector):.+)$'
+          examples: ['terminal:9f1c...', 'merchant:0b2e...', 'system']
+        entity_id: { type: string, description: The transaction, terminal or merchant the event is about. }
+        correlation_id:
+          type: string
+          description: Ties every event of one business action together; defaults to entity_id.
+        payload:
+          type: object
+          description: >-
+            Event-specific detail. Card data is never present: PANs are masked to their last four and secrets
+            (CVV, PIN block, encrypted card data) are removed before the record is hashed and stored.
+        prev_hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Hash of the previous record; 64 zeros for sequence 1.
+        hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: 'SHA-256(prev_hash + "\n" + canonical JSON of the event).'
+    AuditPage:
+      type: object
+      required: [data, next_cursor]
+      additionalProperties: false
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/AuditEvent' } }
+        next_cursor:
+          type: [integer, 'null']
+          description: Pass as cursor for the next page; null on the last page.
+
     CreatePaymentIntentRequest:
       type: object
       additionalProperties: false
