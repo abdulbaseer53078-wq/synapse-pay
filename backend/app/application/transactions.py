@@ -1,8 +1,9 @@
-"""Card transactions (Stage 1, Step 5): POST /v1/transactions for terminals.
+"""Transactions (Stage 1, Step 5), method-agnostic since Step 8.
 
 The terminal's identity comes from its mTLS certificate (the gateway passes it on as x-terminal-id), never
-from the body. The backend never sees a card number: the encrypted card data goes to the card service,
-which decrypts it in the HSM, talks to the acquirer and returns the outcome with a masked card.
+from the body. Which rail handles the payment is the registry's business: this engine validates the request,
+authorizes the terminal, claims the idempotency key, hands the payment to the method's adapter and maps the
+answer onto a transaction state. It contains no card, UPI or wallet logic.
 
 Idempotency follows the spec: the same idempotency_key with the same body replays the stored response;
 with a different body it's a 409. A retryable failure is not stored as the key's result, so the retry runs.
@@ -16,15 +17,13 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from app.application.authorization import AuthorizationService
+from app.application.methods import (AdapterUnavailable, InvalidMethodDetails, MethodRegistry, MethodRequest,
+                                     MethodResult, OutcomeUnknown)
 from app.application.registration import Forbidden, NotFound, RegistrationError, Unauthenticated
 
 # Daily limits reset at midnight in India, where the merchants are.
 # shortcut: one time zone for every merchant; take it from the merchant record when there are others.
 LIMIT_DAY_ZONE = ZoneInfo("Asia/Kolkata")
-
-
-class MethodNotSupported(RegistrationError):
-    code = "INVALID_REQUEST"
 
 
 class IdempotencyConflict(RegistrationError):
@@ -130,7 +129,7 @@ class TransactionRepository(Protocol):
     def spent_today(self, terminal_id: UUID, since: datetime) -> int: ...
     def claim(self, txn: NewTransaction) -> Claim: ...
     def mark_pending(self, transaction_id: UUID, terminal_id: UUID) -> None: ...
-    def finish(self, transaction_id: UUID, terminal_id: UUID, result: CardResult | None, status: str,
+    def finish(self, transaction_id: UUID, terminal_id: UUID, result: MethodResult | None, status: str,
                error: dict | None, store_response: bool) -> dict: ...
 
 
@@ -144,13 +143,6 @@ def public_id(transaction_id: UUID) -> str:
     return f"txn_{transaction_id.hex}"
 
 
-def acquirer_ids(terminal_id: UUID, merchant_id: UUID) -> tuple[str, str]:
-    """The terminal ID (DE 41, 8 chars) and merchant ID (DE 42, 15 chars) the acquirer knows them by.
-    shortcut: derived from the registry UUIDs. Acquirers assign these at merchant onboarding; store them on
-    the terminal and merchant records when the first real acquirer is integrated."""
-    return terminal_id.hex[:8].upper(), merchant_id.hex[:15].upper()
-
-
 def system_error(code: str, message: str, retryable: bool) -> dict:
     return {"error_code": code, "error_message": message, "error_category": "SYSTEM_ERROR", "retryable": retryable}
 
@@ -159,7 +151,7 @@ def system_error(code: str, message: str, retryable: bool) -> dict:
 class TransactionService:
     repo: TransactionRepository
     authorization: AuthorizationService
-    cards: CardProcessor
+    methods: MethodRegistry
     now: Any = field(default=None)  # callable returning an aware datetime; tests can fix the clock
 
     def create(self, caller_terminal: UUID | None, body: dict[str, Any]) -> dict:
@@ -174,10 +166,9 @@ class TransactionService:
             raise NotFound("terminal not found")
         if body["merchant_id"] != str(merchant):
             raise MerchantMismatch("this terminal doesn't belong to that merchant")
-        if body["payment_method"] != "CARD":
-            raise MethodNotSupported(f"{body['payment_method']} isn't supported yet; CARD is")
-
-        details = body["method_details"]
+        # Step 8: one lookup, one validation, and no knowledge of what the method actually is.
+        adapter = self.methods.for_method(body["payment_method"])
+        details = adapter.validate(body["method_details"])
         intent_id = None
         if "payment_intent_id" in body:
             intent_id = parse_public_id(body["payment_intent_id"], "pi_")
@@ -214,29 +205,26 @@ class TransactionService:
                      "error_category": "HARD_DECLINE", "retryable": False}
             return self.repo.finish(transaction_id, caller_terminal, None, "FAILED", error, store_response=True)
 
-        tid, mid = acquirer_ids(caller_terminal, merchant)
-        request = CardRequest(
-            transaction_id=transaction_id, kind="PURCHASE" if txn.capture_mode == "AUTO" else "AUTHORIZATION",
-            amount=txn.amount, currency=txn.currency, acquirer_terminal_id=tid, acquirer_merchant_id=mid,
-            encrypted_card_data=details["encrypted_card_data"], card_expiry=details["card_expiry"],
-            pin_block=details.get("pin_block"))
+        request = MethodRequest(
+            transaction_id=transaction_id, amount=txn.amount, currency=txn.currency,
+            capture_mode=txn.capture_mode, merchant_id=merchant, terminal_id=caller_terminal,
+            details=details, customer_ref=body.get("customer_ref"), metadata=txn.metadata)
         self.repo.mark_pending(transaction_id, caller_terminal)
         try:
-            result = self.cards.process(request)
-        except CardServiceUnavailable:
-            error = system_error("INTERNAL_ERROR", "the card service is unavailable; nothing was charged", True)
+            result = adapter.initiate(request)
+        except AdapterUnavailable as exc:
+            error = system_error("INTERNAL_ERROR", exc.message, True)
             self.repo.finish(transaction_id, caller_terminal, None, "FAILED", error, store_response=False)
             raise
-        except BadCardData as e:
-            error = {"error_code": "INVALID_REQUEST", "error_message": e.message,
+        except InvalidMethodDetails as exc:
+            error = {"error_code": "INVALID_REQUEST", "error_message": exc.message,
                      "error_category": "VALIDATION_ERROR", "retryable": False}
             self.repo.finish(transaction_id, caller_terminal, None, "FAILED", error, store_response=False)
             raise
-        except CardOutcomeUnknown:
-            # Sent, no answer: the acquirer may have approved it. PENDING until reconciliation settles it,
-            # and stored, so a retry with this key can't charge the customer twice.
+        except OutcomeUnknown:
+            # Sent, no answer: the network may have acted on it. PENDING until reconciliation settles it, and
+            # stored, so a retry with this key can't charge the customer twice.
             return self.repo.finish(transaction_id, caller_terminal, None, "PENDING", None, store_response=True)
 
-        retryable = bool(result.error and result.error.get("retryable"))
         return self.repo.finish(transaction_id, caller_terminal, result, result.status, result.error,
-                                store_response=not retryable)
+                                store_response=not result.retryable)
