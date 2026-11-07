@@ -49,6 +49,7 @@ CARD_CAPABILITIES = CapabilityDescriptor(
     supports_partial_capture=True,
     settlement_timeline="T+1",
     auth_type="issuer_authorization",
+    is_synchronous=True,  # the issuer authorizes in-line: the API answers AUTHORIZED, not PENDING
     dispute_rules=DisputeRules(framework="CARD_SCHEME", dispute_window_days=120, resolution_timeline_days=45),
     transitions=(
         Transition("INITIATED", "PENDING"),
