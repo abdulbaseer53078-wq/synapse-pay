@@ -11,15 +11,17 @@
 //! Odd digit counts are left-padded with a 0 nibble.
 //!
 //! An optional top-level `"required"` key lists, per MTI, the fields a message must carry to be packed:
-//! `"required": { "0100": [2, 3, 4, 11] }`.
+//! `"required": { "0100": [2, 3, 4, 11] }`. Two more optional top-level keys describe the message frame:
+//! `"mti": "ascii" | "bcd"` and `"bitmap": "binary" | "hex"` (defaults `ascii`, `binary`).
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
-use crate::bitmap::{Bitmap, BitmapError, MAX_FIELD};
+use crate::bitmap::{Bitmap, BitmapEncoding, BitmapError, MAX_FIELD};
 
 /// Which characters a field may hold (the JSON `format` key).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -64,7 +66,7 @@ pub enum Encoding {
 
 impl Encoding {
     /// Bytes on the wire for `chars` characters.
-    fn wire_len(self, chars: usize) -> usize {
+    pub(crate) fn wire_len(self, chars: usize) -> usize {
         match self {
             Self::Ascii => chars,
             Self::Bcd => chars.div_ceil(2),
@@ -72,7 +74,7 @@ impl Encoding {
     }
 
     /// The `chars` characters in `raw`, as ASCII. None for invalid BCD (a nibble above 9, or a non-zero pad).
-    fn decode(self, raw: &[u8], chars: usize) -> Option<Cow<'_, [u8]>> {
+    pub(crate) fn decode(self, raw: &[u8], chars: usize) -> Option<Cow<'_, [u8]>> {
         match self {
             Self::Ascii => Some(Cow::Borrowed(raw)),
             Self::Bcd => {
@@ -87,7 +89,7 @@ impl Encoding {
     }
 
     /// Appends ASCII `text` in this encoding. For BCD, `text` must be all digits.
-    fn encode(self, text: &[u8], out: &mut Vec<u8>) {
+    pub(crate) fn encode(self, text: &[u8], out: &mut Vec<u8>) {
         match self {
             Self::Ascii => out.extend_from_slice(text),
             Self::Bcd => {
@@ -244,6 +246,16 @@ impl std::error::Error for DictionaryError {}
 pub struct Dictionary {
     fields: [Option<FieldSpec>; MAX_FIELD as usize + 1],
     required: BTreeMap<String, Vec<u8>>, // MTI → fields
+    mti: Encoding,
+    bitmap: BitmapEncoding,
+}
+
+/// Removes and parses an optional top-level key; its default when absent.
+fn take<T: DeserializeOwned + Default>(raw: &mut BTreeMap<String, serde_json::Value>, key: &str)
+    -> Result<T, DictionaryError> {
+    raw.remove(key).map(serde_json::from_value).transpose()
+        .map_err(|e| DictionaryError(format!("{key}: {e}")))
+        .map(Option::unwrap_or_default)
 }
 
 impl Dictionary {
@@ -252,8 +264,9 @@ impl Dictionary {
     pub fn from_json(json: &str) -> Result<Self, DictionaryError> {
         let invalid = |e: serde_json::Error| DictionaryError(e.to_string());
         let mut raw: BTreeMap<String, serde_json::Value> = serde_json::from_str(json).map_err(invalid)?;
-        let required: BTreeMap<String, Vec<u8>> =
-            raw.remove("required").map(serde_json::from_value).transpose().map_err(invalid)?.unwrap_or_default();
+        let required: BTreeMap<String, Vec<u8>> = take(&mut raw, "required")?;
+        let mti = take(&mut raw, "mti")?;
+        let bitmap = take(&mut raw, "bitmap")?;
 
         let mut fields = [None; MAX_FIELD as usize + 1];
         for (key, value) in raw {
@@ -272,7 +285,17 @@ impl Dictionary {
                 return Err(DictionaryError(format!("required: field {f} for {mti} isn't defined")));
             }
         }
-        Ok(Self { fields, required })
+        Ok(Self { fields, required, mti, bitmap })
+    }
+
+    /// How the 4-digit MTI is carried: 4 ASCII bytes, or 2 BCD bytes.
+    pub fn mti_encoding(&self) -> Encoding {
+        self.mti
+    }
+
+    /// How the bitmaps are carried: 8 binary bytes, or 16 hex characters, each.
+    pub fn bitmap_encoding(&self) -> BitmapEncoding {
+        self.bitmap
     }
 
     /// The field's layout, or None if this dialect doesn't define it.

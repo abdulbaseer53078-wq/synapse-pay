@@ -1,6 +1,6 @@
 [package]
 name = "iso8583"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.87"
 description = "ISO 8583 message parsing and building, with per-host JSON dialect dictionaries"
@@ -11,3 +11,6 @@ publish = false  # internal: consumed as a git dependency on the iso8583-v* tags
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+
+[dev-dependencies]
+proptest = "1"

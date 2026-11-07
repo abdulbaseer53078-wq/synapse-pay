@@ -3,8 +3,7 @@
 //! Strict by design: a bit set for a field the dictionary doesn't define, a malformed field or bytes left
 //! over all mean the parser has lost its alignment, so they fail instead of guessing.
 //!
-//! shortcut: ASCII MTI and no message header (e.g. Visa's); add both to the dictionary when a host that
-//! needs them is onboarded.
+//! shortcut: no message header (e.g. Visa's); add it to the dictionary when a host that needs it is onboarded.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -113,13 +112,16 @@ impl From<FieldError> for ParseError {
 
 /// Parses one message. `input` must hold exactly one message, from the MTI to the last field.
 pub fn unpack<'a>(input: &'a [u8], dictionary: &Dictionary) -> Result<Iso8583Message<'a>, ParseError> {
-    let mti: [u8; MTI_LEN] = input.get(..MTI_LEN)
+    let encoding = dictionary.mti_encoding();
+    let mti_wire = encoding.wire_len(MTI_LEN);
+    let mti: [u8; MTI_LEN] = input.get(..mti_wire)
+        .and_then(|raw| encoding.decode(raw, MTI_LEN))
         .filter(|m| m.iter().all(u8::is_ascii_digit))
-        .ok_or(ParseError::InvalidMti)?
-        .try_into().expect("MTI_LEN bytes");
+        .and_then(|m| m.as_ref().try_into().ok())
+        .ok_or(ParseError::InvalidMti)?;
 
-    let (bitmap, consumed) = Bitmap::parse(&input[MTI_LEN..])?;
-    let mut pos = MTI_LEN + consumed;
+    let (bitmap, consumed) = Bitmap::parse_as(&input[mti_wire..], dictionary.bitmap_encoding())?;
+    let mut pos = mti_wire + consumed;
 
     let mut fields = Vec::with_capacity(bitmap.fields().count());
     for field in bitmap.fields() {

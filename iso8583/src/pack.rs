@@ -40,8 +40,8 @@ pub fn pack(msg: &Iso8583Message, dictionary: &Dictionary) -> Result<Vec<u8>, Pa
     let bitmap = Bitmap::from_fields(msg.fields()).map_err(PackError::Bitmap)?;
 
     let mut out = Vec::with_capacity(256);
-    out.extend_from_slice(msg.mti().as_bytes());
-    bitmap.encode_into(&mut out);
+    dictionary.mti_encoding().encode(msg.mti().as_bytes(), &mut out);
+    bitmap.encode_as(dictionary.bitmap_encoding(), &mut out);
     for field in msg.fields() {
         let value = msg.get(field).expect("fields() lists only present fields");
         dictionary.write(field, value, &mut out).map_err(PackError::Field)?;

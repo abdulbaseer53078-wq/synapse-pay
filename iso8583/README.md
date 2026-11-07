@@ -10,7 +10,7 @@ The crate isn't published to a registry (`publish = false`). Depend on the git t
 
 ```toml
 [dependencies]
-iso8583 = { git = "https://github.com/abdulbaseer53078-wq/synapse-pay", tag = "iso8583-v1.0.0" }
+iso8583 = { git = "https://github.com/abdulbaseer53078-wq/synapse-pay", tag = "iso8583-v1.1.0" }
 ```
 
 ## Use
@@ -40,14 +40,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-A message is laid out as: **MTI** (4 ASCII digits), **bitmaps** (8 bytes each, binary; a second and third
-follow when bit 1 of the previous one is set, for fields up to 192), then **each field present**, in
-ascending field number, with its length prefix if it has one.
+A message is laid out as: **MTI** (4 digits), **bitmaps** (a second and third follow when bit 1 of the
+previous one is set, for fields up to 192), then **each field present**, in ascending field number, with its
+length prefix if it has one. How the MTI and bitmaps are carried is set per dialect (see below).
 
 ## Dictionary format
 
 A JSON object. Each key is a field number (`"2"` to `"192"`, except the bitmap continuation bits 1, 65
-and 129) mapping to that field's definition. One optional key, `"required"`, is not a field.
+and 129) mapping to that field's definition. Three optional keys are not fields: `"required"`, `"mti"` and
+`"bitmap"`.
 
 ```json
 {
@@ -55,7 +56,9 @@ and 129) mapping to that field's definition. One optional key, `"required"`, is 
   "4":  { "type": "FIXED",  "length": 12,      "format": "n", "encoding": "bcd" },
   "41": { "type": "FIXED",  "length": 8,       "format": "ans" },
   "55": { "type": "LLLVAR", "max_length": 255, "format": "b" },
-  "required": { "0100": [2, 4, 41] }
+  "required": { "0100": [2, 4, 41] },
+  "mti": "bcd",
+  "bitmap": "binary"
 }
 ```
 
@@ -82,6 +85,13 @@ Maps an MTI to the fields a message with that MTI must carry. `pack` refuses to 
 required fields. `unpack` doesn't enforce it: a host may legitimately send fewer fields than you require when
 sending.
 
+### `mti` and `bitmap` (since 1.1.0)
+
+| Key | Values | Meaning |
+| --- | --- | --- |
+| `mti` | `ascii` (default), `bcd` | The 4-digit MTI as 4 ASCII bytes, or as 2 packed-BCD bytes (`0100` → `01 00`). |
+| `bitmap` | `binary` (default), `hex` | Each 64-bit bitmap as 8 bytes, or as 16 **uppercase** hex characters (`7000000000008000`). Lowercase is rejected, so every accepted message packs back to the same bytes. |
+
 ### Dialect files
 
 [`dialects/`](dialects/) holds `example.json`, `illustrative-rupay.json`, `illustrative-visa.json` and
@@ -96,13 +106,16 @@ your acquirer's interface spec and validate it against their certification messa
   any of them means the parser has lost its alignment.
 - **Descriptive.** Errors name the field and the rule, e.g.
   `FieldError::LengthExceeded { field: 2, max: 19, actual: 20 }` ("field 2 is 20 long, over its maximum of 19").
+- **Never panics.** Property tests (`tests/never_panics.rs`) feed random bytes and mutated host messages to
+  every dialect and check that `unpack` returns `Ok` or `Err`, and that anything it accepts packs back to
+  exactly the same bytes.
 - **No card data in errors or logs.** Errors never include field values, and `Iso8583Message`'s `Debug`
   output shows only field numbers and lengths.
 
-## Not supported in 1.0.0
+## Not supported in 1.1.0
 
-BCD-encoded MTIs, message headers (e.g. Visa's), EBCDIC text, hex-ASCII bitmaps, and dialects that use DE 65
-as a data field. Each would be an additive change.
+Message headers (e.g. Visa's), EBCDIC text, and dialects that use DE 65 as a data field. Each would be an
+additive change. (1.1.0 added BCD MTIs and hex-ASCII bitmaps.)
 
 ## Stability
 

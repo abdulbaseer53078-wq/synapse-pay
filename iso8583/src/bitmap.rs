@@ -1,12 +1,13 @@
 //! ISO 8583 bitmaps (DE 1): which data elements a message carries.
 //!
-//! Binary bitmaps, 8 bytes each, most significant bit first: bit 1 is the top bit of the first byte.
+//! Each bitmap is 64 bits, most significant bit first: bit 1 is the top bit. On the wire it is either
+//! 8 binary bytes or 16 uppercase hex characters ([`BitmapEncoding`], chosen by the dialect).
 //! Bit 1 of each bitmap says another bitmap follows, so fields 1, 65 and 129 are continuation bits that
 //! this type derives on encode and strips on parse; callers only ever deal with data fields.
-//!
-//! shortcut: binary bitmaps only; hex-ASCII bitmaps (16 chars each) come with the per-dialect schema.
 
 use std::fmt;
+
+use serde::Deserialize;
 
 /// Primary, secondary, tertiary: fields 1-192.
 pub const MAX_BITMAPS: usize = 3;
@@ -26,6 +27,52 @@ pub enum BitmapError {
     ReservedField(u8),
     /// The tertiary bitmap's bit 1 asks for a fourth bitmap, which ISO 8583 doesn't define.
     TooManyBitmaps,
+    /// A hex bitmap contains a character other than 0-9 and A-F.
+    InvalidHex,
+}
+
+/// How bitmaps are carried on the wire.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum BitmapEncoding {
+    /// 8 bytes per bitmap.
+    #[default]
+    Binary,
+    /// 16 uppercase hex characters per bitmap. Lowercase is rejected, so a parsed message has exactly one
+    /// encoding and `pack(unpack(raw)) == raw` still holds.
+    Hex,
+}
+
+impl BitmapEncoding {
+    /// Wire bytes per 64-bit bitmap.
+    fn width(self) -> usize {
+        match self {
+            Self::Binary => BITMAP_LEN,
+            Self::Hex => 2 * BITMAP_LEN,
+        }
+    }
+
+    fn decode(self, chunk: &[u8]) -> Option<u64> {
+        match self {
+            Self::Binary => Some(u64::from_be_bytes(chunk.try_into().ok()?)),
+            Self::Hex => chunk.iter().try_fold(0u64, |acc, &c| {
+                let nibble = match c {
+                    b'0'..=b'9' => c - b'0',
+                    b'A'..=b'F' => c - b'A' + 10,
+                    _ => return None,
+                };
+                Some(acc << 4 | u64::from(nibble))
+            }),
+        }
+    }
+
+    fn encode(self, word: u64, out: &mut Vec<u8>) {
+        match self {
+            Self::Binary => out.extend_from_slice(&word.to_be_bytes()),
+            Self::Hex => out.extend_from_slice(format!("{word:016X}").as_bytes()),
+        }
+    }
 }
 
 impl fmt::Display for BitmapError {
@@ -37,6 +84,7 @@ impl fmt::Display for BitmapError {
             Self::FieldOutOfRange(n) => write!(f, "field {n} is outside 1-{MAX_FIELD}"),
             Self::ReservedField(n) => write!(f, "field {n} is a bitmap continuation bit, not a data field"),
             Self::TooManyBitmaps => write!(f, "tertiary bitmap's bit 1 is set, but there is no fourth bitmap"),
+            Self::InvalidHex => write!(f, "hex bitmap contains a character other than 0-9 and A-F"),
         }
     }
 }
@@ -106,26 +154,37 @@ impl Bitmap {
         self.words.iter().rposition(|&w| w != 0).map_or(1, |last| last + 1)
     }
 
-    /// Appends the encoded bitmaps (8, 16 or 24 bytes) to `out`, setting each continuation bit.
+    /// Appends the encoded binary bitmaps (8, 16 or 24 bytes) to `out`, setting each continuation bit.
     pub fn encode_into(&self, out: &mut Vec<u8>) {
+        self.encode_as(BitmapEncoding::Binary, out);
+    }
+
+    /// Appends the bitmaps in `encoding`, setting each continuation bit.
+    pub fn encode_as(&self, encoding: BitmapEncoding, out: &mut Vec<u8>) {
         let count = self.bitmap_count();
         for (i, &word) in self.words[..count].iter().enumerate() {
             let continued = if i + 1 < count { 1u64 << 63 } else { 0 };
-            out.extend_from_slice(&(word | continued).to_be_bytes());
+            encoding.encode(word | continued, out);
         }
     }
 
-    /// Reads the bitmaps at the start of `input`. Returns the bitmap and how many bytes it took
+    /// Reads binary bitmaps at the start of `input`. Returns the bitmap and how many bytes it took
     /// (the data elements start there). Doesn't copy `input`.
     pub fn parse(input: &[u8]) -> Result<(Self, usize), BitmapError> {
+        Self::parse_as(input, BitmapEncoding::Binary)
+    }
+
+    /// Reads bitmaps in `encoding` at the start of `input`; see [`parse`](Self::parse).
+    pub fn parse_as(input: &[u8], encoding: BitmapEncoding) -> Result<(Self, usize), BitmapError> {
+        let width = encoding.width();
         let mut bitmap = Self::new();
         let mut offset = 0;
         for word in &mut bitmap.words {
-            let Some(chunk) = input.get(offset..offset + BITMAP_LEN) else {
-                return Err(BitmapError::Truncated { needed: offset + BITMAP_LEN, available: input.len() });
+            let Some(chunk) = input.get(offset..offset + width) else {
+                return Err(BitmapError::Truncated { needed: offset + width, available: input.len() });
             };
-            offset += BITMAP_LEN;
-            let raw = u64::from_be_bytes(chunk.try_into().expect("slice is BITMAP_LEN bytes"));
+            offset += width;
+            let raw = encoding.decode(chunk).ok_or(BitmapError::InvalidHex)?;
             *word = raw & !(1u64 << 63);
             if raw >> 63 == 0 {
                 return Ok((bitmap, offset));
@@ -194,6 +253,34 @@ mod tests {
             assert_eq!(out.len(), 8 * (usize::from(field - 1) / 64 + 1), "field {field}");
             assert_eq!(Bitmap::parse(&out).unwrap(), (built, out.len()), "field {field}");
         }
+    }
+
+    #[test]
+    fn hex_bitmaps_carry_the_same_bits_as_text() {
+        let bitmap = Bitmap::from_fields([2, 3, 4, 49, 102]).unwrap();
+        let mut out = Vec::new();
+        bitmap.encode_as(BitmapEncoding::Hex, &mut out);
+        assert_eq!(out, b"F0000000000080000000000004000000");
+        out.extend_from_slice(b"rest");
+        assert_eq!(Bitmap::parse_as(&out, BitmapEncoding::Hex).unwrap(), (bitmap, 32));
+
+        for field in (2..=MAX_FIELD).filter(|&f| !is_continuation(f)) {
+            let built = Bitmap::from_fields([field]).unwrap();
+            let mut out = Vec::new();
+            built.encode_as(BitmapEncoding::Hex, &mut out);
+            assert_eq!(Bitmap::parse_as(&out, BitmapEncoding::Hex).unwrap(), (built, out.len()), "field {field}");
+        }
+    }
+
+    #[test]
+    fn malformed_hex_bitmaps_are_rejected() {
+        let hex = BitmapEncoding::Hex;
+        assert_eq!(Bitmap::parse_as(b"7000000000008000", hex).unwrap().1, 16);
+        assert_eq!(Bitmap::parse_as(b"700000000000800a", hex), Err(BitmapError::InvalidHex), "lowercase");
+        assert_eq!(Bitmap::parse_as(b"70000000000080G0", hex), Err(BitmapError::InvalidHex));
+        assert_eq!(Bitmap::parse_as(b"70000000", hex), Err(BitmapError::Truncated { needed: 16, available: 8 }));
+        assert_eq!(Bitmap::parse_as(b"F000000000000000", hex),
+                   Err(BitmapError::Truncated { needed: 32, available: 16 }), "secondary promised");
     }
 
     #[test]
