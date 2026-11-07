@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Example shop</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 420px; margin: 40px auto; padding: 0 16px; }
+    button { width: 100%; padding: 12px; font: inherit; border: 0; border-radius: 8px; background: #2457ff; color: #fff; }
+    button:disabled { opacity: .5; }
+    #message { min-height: 1.5em; }
+  </style>
+</head>
+<body>
+  <h1>Order 7781</h1>
+  <p>Total ₹500.00</p>
+  <div id="card"></div>
+  <button id="pay" disabled>Pay ₹500.00</button>
+  <p id="message" role="status"></p>
+  <!-- 2. Synapse's card form: the card number never touches this page or this server. -->
+  <script src="{{API}}/js/synapsepay.js"></script>
+  <script>
+    const synapse = SynapsePay({ apiBase: "{{API}}" });
+    const pay = document.getElementById("pay"), message = document.getElementById("message");
+    const card = synapse.mountCard("#card", { onChange: (e) => { pay.disabled = !e.complete; } });
+    let clientSecret;
+    const messages = {
+      ERR_NETWORK: "Check your internet connection and try again.",
+      ERR_CARD_DECLINED: "Your bank declined the card. Try another card.",
+      ERR_AUTHENTICATION_FAILED: "Your bank couldn't verify this payment. Try again or use another card.",
+      ERR_CANCELED: "Payment canceled.",
+    };
+    pay.onclick = async () => {
+      pay.disabled = true;
+      message.textContent = "Paying...";
+      // One payment intent per order: reuse it if the customer tries again.
+      clientSecret ??= (await (await fetch("/create-payment", { method: "POST" })).json()).clientSecret;
+      const { paymentIntent, error } = await synapse.confirmCardPayment(clientSecret, card);
+      if (error) {
+        message.textContent = messages[error.code] ?? error.message;
+        pay.disabled = false;
+      } else if (paymentIntent.status === "SUCCEEDED") {
+        message.textContent = `Paid with the card ending ${paymentIntent.card.last4}. Thank you!`;
+      } else {
+        message.textContent = "We're confirming your payment with your bank.";
+      }
+    };
+  </script>
+</body>
+</html>

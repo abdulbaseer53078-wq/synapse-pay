@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Card details</title>
+  <link rel="stylesheet" href="card-frame.css">
+</head>
+<body>
+  <form id="card" autocomplete="on" novalidate>
+    <label for="number">Card number</label>
+    <input id="number" name="cardnumber" inputmode="numeric" autocomplete="cc-number" placeholder="1234 1234 1234 1234"
+           maxlength="23" spellcheck="false" required>
+    <div class="row">
+      <div>
+        <label for="expiry">Expiry</label>
+        <input id="expiry" name="exp-date" inputmode="numeric" autocomplete="cc-exp" placeholder="MM / YY" maxlength="7" required>
+      </div>
+      <div>
+        <label for="cvc">CVV</label>
+        <input id="cvc" name="cvc" inputmode="numeric" autocomplete="cc-csc" placeholder="123" maxlength="4" required>
+      </div>
+    </div>
+    <p id="error" role="alert" aria-live="polite"></p>
+  </form>
+  <script src="card-frame.js"></script>
+</body>
+</html>

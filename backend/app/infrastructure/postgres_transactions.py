@@ -7,19 +7,26 @@ from psycopg_pool import ConnectionPool
 
 from app.application.transactions import CardResult, Claim, NewTransaction, public_id
 from app.domain.terminal import Actor
+from app.infrastructure.webhook_outbox import enqueue
 from app.infrastructure.postgres_terminals import _OUTBOX_LOCK
 
 # Statuses that count against a terminal's daily limit: money moved, or may have.
 _SPENDING = ("PENDING", "AUTHORIZED", "CAPTURED", "SETTLED")
 
 
-def _audit(conn: Connection, terminal_id: UUID, transaction_id: UUID, action: str, from_status: str | None,
-           to_status: str, reason: str | None = None) -> None:
+def _audit_entity(conn: Connection, actor: str, actor_id: str | None, entity_type: str, entity_id: UUID,
+                  action: str, from_status: str | None, to_status: str, reason: str | None = None) -> None:
     conn.execute("SELECT pg_advisory_xact_lock_shared(%s)", (_OUTBOX_LOCK,))
     conn.execute(
         "INSERT INTO audit_log (actor_type, actor_id, entity_type, entity_id, action, from_status, to_status, reason)"
-        " VALUES (%s, %s, 'transaction', %s, %s, %s, %s, %s)",
-        (Actor.TERMINAL, str(terminal_id), transaction_id, action, from_status, to_status, reason))
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+        (actor, actor_id, entity_type, entity_id, action, from_status, to_status, reason))
+
+
+def _audit(conn: Connection, terminal_id: UUID, transaction_id: UUID, action: str, from_status: str | None,
+           to_status: str, reason: str | None = None) -> None:
+    _audit_entity(conn, Actor.TERMINAL, str(terminal_id), "transaction", transaction_id, action, from_status,
+                  to_status, reason)
 
 
 def _response(row) -> dict:
@@ -39,6 +46,27 @@ def _response(row) -> dict:
     return body
 
 
+def settle_intent(conn: Connection, intent_id: UUID, transaction_status: str, error: dict | None,
+                  card_bin: str | None, card_last4: str | None) -> None:
+    """Moves an intent on after one of its transactions ends: succeeded, still unknown, or back to the customer
+    to try again (a declined card isn't the end of a checkout)."""
+    if transaction_status in ("CAPTURED", "AUTHORIZED"):
+        status, last_error = "SUCCEEDED", None
+    elif transaction_status == "PENDING":
+        status, last_error = "PROCESSING", None
+    else:
+        status, last_error = "REQUIRES_PAYMENT_METHOD", error
+    conn.execute(
+        "UPDATE payment_intents SET status = %s, last_payment_error = %s, card_bin = coalesce(%s, card_bin),"
+        " card_last4 = coalesce(%s, card_last4), pending_card = NULL, updated_at = now() WHERE intent_id = %s",
+        (status, Jsonb(last_error) if last_error else None, card_bin, card_last4, intent_id))
+
+
+class _IntentRefused(Exception):
+    def __init__(self, why: str):
+        self.why = why
+
+
 class PostgresTransactionRepository:
     def __init__(self, pool: ConnectionPool):
         self.pool = pool
@@ -56,6 +84,12 @@ class PostgresTransactionRepository:
                 (terminal_id, since, list(_SPENDING))).fetchone()[0]
 
     def claim(self, txn: NewTransaction) -> Claim:
+        try:
+            return self._claim(txn)
+        except _IntentRefused as refused:
+            return Claim(intent_error=refused.why)
+
+    def _claim(self, txn: NewTransaction) -> Claim:
         with self.pool.connection() as conn, conn.transaction():
             inserted = conn.execute(
                 "INSERT INTO idempotency_keys (merchant_id, idempotency_key, request_hash, state)"
@@ -71,16 +105,41 @@ class PostgresTransactionRepository:
                 if state == "IN_FLIGHT":
                     return Claim(in_flight=True)
                 return Claim(replay=response)
+            if txn.payment_intent_id is not None:
+                why = self._take_intent(conn, txn)
+                if why is not None:
+                    # Rolls back the whole claim, releasing the idempotency key: fix the request and resend.
+                    raise _IntentRefused(why)
             (transaction_id,) = conn.execute(
                 "INSERT INTO transactions (idempotency_key, merchant_id, terminal_id, amount, currency, payment_method,"
-                " capture_mode, status, card_network, metadata)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, 'INITIATED', %s, %s) RETURNING transaction_id",
+                " capture_mode, status, card_network, metadata, webhook_url, payment_intent_id)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, 'INITIATED', %s, %s, %s, %s) RETURNING transaction_id",
                 (txn.idempotency_key, txn.merchant_id, txn.terminal_id, txn.amount, txn.currency, txn.payment_method,
-                 txn.capture_mode, txn.card_network, Jsonb(txn.metadata))).fetchone()
+                 txn.capture_mode, txn.card_network, Jsonb(txn.metadata), txn.webhook_url,
+                 txn.payment_intent_id)).fetchone()
+            if txn.payment_intent_id is not None:
+                conn.execute("UPDATE payment_intents SET transaction_id = %s WHERE intent_id = %s",
+                             (transaction_id, txn.payment_intent_id))
             conn.execute("UPDATE idempotency_keys SET transaction_id = %s WHERE merchant_id = %s AND idempotency_key = %s",
                          (transaction_id, txn.merchant_id, txn.idempotency_key))
             _audit(conn, txn.terminal_id, transaction_id, "transaction.create", None, "INITIATED")
             return Claim(transaction_id=transaction_id)
+
+    @staticmethod
+    def _take_intent(conn: Connection, txn: NewTransaction) -> str | None:
+        """Locks the terminal checkout this payment completes and moves it to PROCESSING. Returns why not, if not."""
+        row = conn.execute("SELECT terminal_id, merchant_id, amount, currency, status, expires_at > now()"
+                           " FROM payment_intents WHERE intent_id = %s FOR UPDATE",
+                           (txn.payment_intent_id,)).fetchone()
+        if row is None or row[0] != txn.terminal_id or row[1] != txn.merchant_id:
+            return "no such payment intent for this terminal"
+        if (row[2], row[3]) != (txn.amount, txn.currency):
+            return "amount and currency must match the payment intent"
+        if row[4] != "REQUIRES_PAYMENT_METHOD" or not row[5]:
+            return f"payment intent is {row[4] if row[5] else 'expired'}, not waiting for payment"
+        conn.execute("UPDATE payment_intents SET status = 'PROCESSING', last_payment_error = NULL, updated_at = now()"
+                     " WHERE intent_id = %s", (txn.payment_intent_id,))
+        return None
 
     def mark_pending(self, transaction_id: UUID, terminal_id: UUID) -> None:
         with self.pool.connection() as conn, conn.transaction():
@@ -97,13 +156,20 @@ class PostgresTransactionRepository:
                 "UPDATE transactions SET status = %s, error = %s, method_reference = %s, auth_code = %s,"
                 " card_bin = %s, card_last4 = %s, reversal = %s, updated_at = now() WHERE transaction_id = %s"
                 " RETURNING transaction_id, idempotency_key, status, amount, currency, payment_method,"
-                " method_reference, auth_code, error, metadata, created_at, updated_at, merchant_id",
+                " method_reference, auth_code, error, metadata, created_at, updated_at, merchant_id,"
+                " payment_intent_id, webhook_url",
                 (status, Jsonb(error) if error else None,
                  result.method_reference if result else None, result.auth_code if result else None,
                  result.card_bin if result else None, result.card_last4 if result else None,
                  result.reversal if result else None, transaction_id)).fetchone()
             response = _response(row[:12])
-            merchant_id, idempotency_key = row[12], row[1]
+            merchant_id, idempotency_key, intent_id, webhook_url = row[12], row[1], row[13], row[14]
+            if intent_id is not None:
+                response["payment_intent_id"] = f"pi_{intent_id.hex}"
+                settle_intent(conn, intent_id, status, error, result.card_bin if result else None,
+                              result.card_last4 if result else None)
+            if status != "PENDING":
+                enqueue(conn, merchant_id, webhook_url, response)
             if store_response:
                 conn.execute("UPDATE idempotency_keys SET state = 'DONE', response = %s"
                              " WHERE merchant_id = %s AND idempotency_key = %s",
@@ -116,3 +182,4 @@ class PostgresTransactionRepository:
                                                          result.reversal != "NOT_NEEDED" else None)
             _audit(conn, terminal_id, transaction_id, "transaction.finish", previous, status, reason)
             return response
+
