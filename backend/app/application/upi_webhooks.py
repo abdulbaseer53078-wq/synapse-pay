@@ -28,7 +28,7 @@ class WebhookEventStore(Protocol):
 
 
 class WebhookTransactions(Protocol):
-    def by_method_reference(self, method: str, reference: str) -> tuple[UUID, UUID, str] | None: ...
+    def by_method_reference(self, reference: str, method: str | None = None) -> tuple[UUID, UUID, str] | None: ...
 
     def finish(self, transaction_id: UUID, terminal_id: UUID, result: MethodResult | None, status: str,
                error: dict | None, store_response: bool) -> dict: ...
@@ -59,7 +59,7 @@ class UpiWebhookHandler:
             return WebhookOutcome(duplicate=True, applied=False, status=None)
 
         reference = update.result.method_reference or ""
-        found = self.transactions.by_method_reference("UPI", reference)
+        found = self.transactions.by_method_reference(reference)
         if found is None:
             # Signed, fresh, but about a payment we do not know. Acknowledge (the provider must stop retrying)
             # and leave a trail: this is a configuration or routing bug, not something to answer 4xx for.

@@ -50,8 +50,8 @@ class FakeTransactions:
     def __init__(self):
         self.finished, self.lookups = [], []
 
-    def by_method_reference(self, method, reference):
-        self.lookups.append((method, reference))
+    def by_method_reference(self, reference, method=None):
+        self.lookups.append((reference, method))
         if reference != "psp_known":
             return None
         return TRANSACTION, TERMINAL, "PENDING"

@@ -254,5 +254,9 @@ class MethodRegistry:
     def methods(self) -> list[str]:
         return sorted(self._adapters)
 
+    def adapters(self):
+        """The registered adapters, in registration order (used to build a second registry that adds one)."""
+        return list(self._adapters.values())
+
     def __contains__(self, method: str) -> bool:
         return method in self._adapters
