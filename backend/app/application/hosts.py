@@ -118,9 +118,13 @@ class RestHostProvider:
 class HealthRegistry:
     """The one view the router reads: Python's PSPs plus whatever Rust reports about its card hosts."""
 
-    def __init__(self, local: list[RestHostProvider], card_source: HostHealthSource | None = None):
+    def __init__(self, local: list[RestHostProvider], card_source: HostHealthSource | None = None,
+                 card_host_ids: tuple[str, ...] = ()):
         self.local = local
         self.card_source = card_source
+        # Which card hosts exist is Rust's knowledge, so it has to be configured here: when the poll fails we
+        # must name them DOWN, not silently report that the card rail has no hosts. Operators need the name.
+        self.card_host_ids = tuple(card_host_ids)
 
     def snapshot(self) -> list[HostHealth]:
         return self._merge()
@@ -139,12 +143,40 @@ class HealthRegistry:
         return health
 
     def _card_hosts_down(self) -> list[HostHealth]:
-        return [HostHealth(provider.host_id, "CARD", HealthStatus.DOWN) for provider in self.local
-                if provider.rail_type == "CARD"]
+        return [HostHealth(host_id, "CARD", HealthStatus.DOWN) for host_id in self.card_host_ids]
 
     def get_healthy_host(self, rail_type: str) -> HostHealth:
-        """UP before DEGRADED, then lowest latency. A slow host only wins when nothing faster is up."""
-        candidates = [h for h in self._merge() if h.rail_type == rail_type and h.usable]
-        if not candidates:
-            raise NoHealthyHostError(f"no healthy {rail_type} host is available")
-        return min(candidates, key=lambda h: (h.status != HealthStatus.UP, h.latency_ms or 0))
+        return pick_healthy(self._merge(), rail_type)
+
+
+def pick_healthy(hosts: list[HostHealth], rail_type: str) -> HostHealth:
+    """UP before DEGRADED, then lowest latency. A slow host only wins when nothing faster is up."""
+    candidates = [h for h in hosts if h.rail_type == rail_type and h.usable]
+    if not candidates:
+        raise NoHealthyHostError(f"no healthy {rail_type} host is available")
+    return min(candidates, key=lambda h: (h.status != HealthStatus.UP, h.latency_ms or 0))
+
+
+class CachedHealth:
+    """The snapshot the router reads. Refreshed by the poller, never on the transaction hot path.
+
+    Before the first successful poll it is empty, and an empty snapshot means no host is usable — fail closed
+    by construction rather than by a flag someone could forget to set.
+    """
+
+    def __init__(self, registry: HealthRegistry, clock: Callable[[], float] = time.monotonic):
+        self.registry = registry
+        self.clock = clock
+        self._snapshot: list[HostHealth] = []
+        self.refreshed_at: float = 0.0
+
+    def refresh(self) -> list[HostHealth]:
+        self._snapshot = self.registry.snapshot()
+        self.refreshed_at = self.clock()
+        return self._snapshot
+
+    def snapshot(self) -> list[HostHealth]:
+        return list(self._snapshot)
+
+    def get_healthy_host(self, rail_type: str) -> HostHealth:
+        return pick_healthy(self._snapshot, rail_type)
