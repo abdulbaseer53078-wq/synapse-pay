@@ -5,37 +5,116 @@ Schedule it at least every 30 seconds (cron, or Celery beat once the queue exist
 
 relay-events runs forever, publishing registry events from the audit log to Kafka. Run one or more
 instances; the outbox cursor lock lets only one publish at a time.
+
+audit-ingest runs forever, chaining new audit_log rows into audit_events and WORM storage (Step 7.3/7.4).
+Exactly one instance; it holds the chain head lock.
+
+audit-publish runs forever, fanning the chained events out to audit.events for external consumers (Step 7.2).
+
+verify-audit runs once: it recomputes the whole chain from WORM storage and exits non-zero on a mismatch.
+Schedule it hourly (Step 7.7) — a chain nobody checks is a decoration.
+
+audit-seed writes a synthetic payment timeline to audit_log, so the pipeline can be demonstrated and tested
+before the SDK and terminal producers exist.
 """
 import os
 import sys
 import time
+from uuid import uuid4
 
+from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from app.application.audit import AuditVerifier
 from app.application.events import EventRelay
+from app.infrastructure.audit_alerts import NullAlerter, WebhookAlerter
+from app.infrastructure.audit_worm import worm_from_env
+from app.infrastructure.postgres_audit import PostgresAuditStore
 from app.infrastructure.postgres_terminals import PostgresTerminalRepository
 
-USAGE = "usage: python -m app.jobs refresh-health | relay-events"
+JOBS = ("refresh-health", "relay-events", "audit-ingest", "audit-publish", "verify-audit", "audit-seed")
+USAGE = f"usage: python -m app.jobs {' | '.join(JOBS)}"
+
+
+def _alerter():
+    url = os.environ.get("AUDIT_ALERT_WEBHOOK_URL")
+    return WebhookAlerter(url) if url else NullAlerter()
 
 
 def main(argv: list[str]) -> None:
-    if argv not in (["refresh-health"], ["relay-events"]):
+    if len(argv) != 1 or argv[0] not in JOBS:
         sys.exit(USAGE)
+    job = argv[0]
     with ConnectionPool(os.environ["DATABASE_URL"], min_size=1, max_size=1) as pool:
-        repo = PostgresTerminalRepository(pool)
-        if argv == ["refresh-health"]:
-            print(f"health_state changed for {repo.refresh_health()} terminal(s)")
+        if job == "refresh-health":
+            print(f"health_state changed for {PostgresTerminalRepository(pool).refresh_health()} terminal(s)")
             return
-        from app.infrastructure.kafka_events import KafkaEventPublisher  # only this job needs the Kafka client
-        relay = EventRelay(repo, KafkaEventPublisher(os.environ["KAFKA_BOOTSTRAP_SERVERS"]))
-        while True:
-            try:
-                if relay.run_once() == 0:
-                    time.sleep(0.2)
-            except Exception as exc:  # keep relaying; the cursor didn't move, so the batch is retried
-                print(f"relay failed, retrying: {exc}", file=sys.stderr)
-                time.sleep(1)
+        if job == "relay-events":
+            _relay(pool)
+            return
+        store = PostgresAuditStore(pool)
+        if job == "audit-ingest":
+            _forever(lambda: store.ingest(worm_from_env(), limit=500), idle=0.5,
+                     done=lambda n: print(f"chained {n} event(s)"))
+        elif job == "audit-publish":
+            _publish(store)
+        elif job == "verify-audit":
+            result = AuditVerifier(worm_from_env(), store, _alerter()).run()
+            print(f"checked {result.checked} event(s), head {result.chain_head}: "
+                  f"{'OK' if result.ok else 'TAMPERED — ' + (result.detail or '')}")
+            sys.exit(0 if result.ok else 1)
+        elif job == "audit-seed":
+            _seed(pool)
 
 
-if __name__ == "__main__":
-    main(sys.argv[1:])
+def _relay(pool: ConnectionPool) -> None:
+    from app.infrastructure.kafka_events import KafkaEventPublisher  # only this job needs the Kafka client
+    relay = EventRelay(PostgresTerminalRepository(pool), KafkaEventPublisher(os.environ["KAFKA_BOOTSTRAP_SERVERS"]))
+    _forever(lambda: relay.run_once(), idle=0.2)
+
+
+def _publish(store: PostgresAuditStore) -> None:
+    from app.infrastructure.kafka_audit import KafkaAuditPublisher
+    publisher = KafkaAuditPublisher(os.environ["KAFKA_BOOTSTRAP_SERVERS"])
+
+    def once() -> int:
+        records = store.pending_publish()
+        if records:
+            publisher.publish(records)
+            store.mark_published(records[-1]["sequence"])
+        return len(records)
+
+    _forever(once, idle=0.2)
+
+
+def _forever(step, idle: float, done=None) -> None:
+    while True:
+        try:
+            count = step()
+            if count and done:
+                done(count)
+            if not count:
+                time.sleep(idle)
+        except Exception as exc:  # keep the loop alive; the cursor did not move, so the batch is retried
+            print(f"job step failed, retrying: {type(exc).__name__}: {exc}", file=sys.stderr)
+            time.sleep(1)
+
+
+def _seed(pool: ConnectionPool) -> None:
+    """A three-event payment, including a PAN, to prove masking end to end without a card service."""
+    transaction_id, terminal_id = uuid4(), uuid4()
+    timeline = [
+        ("transaction.create", None, "INITIATED",
+         {"amount": 49999, "currency": "INR", "note": "customer paid with 4111111111111111"}),
+        ("transaction.send", "INITIATED", "PENDING", {}),
+        ("transaction.finish", "PENDING", "AUTHORIZED",
+         {"response_code": "00", "pan": "4111111111111111", "cvv": "123"}),
+    ]
+    with pool.connection() as conn, conn.transaction():
+        for action, from_status, to_status, payload in timeline:
+            conn.execute(
+                "INSERT INTO audit_log (actor_type, actor_id, entity_type, entity_id, action, from_status, to_status,"
+                " correlation_id, payload) VALUES ('TERMINAL', %s, 'transaction', %s, %s, %s, %s, %s, %s)",
+                (str(terminal_id), transaction_id, action, from_status, to_status, str(transaction_id),
+                 Jsonb(payload)))
+    print(f"seeded {len(timeline)} audit event(s); correlation_id={transaction_id}")

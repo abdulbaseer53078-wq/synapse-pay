@@ -33,6 +33,18 @@ def with_scope(scope: str):
     return dependency
 
 
+def with_any_scope(*scopes: str):
+    """Dependency: the claims of a valid OAuth access token that carries at least one of `scopes`."""
+
+    def dependency(request: Request, creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> dict:
+        claims = _claims(request, creds)
+        if not set(claims.get("scope", "").split()).intersection(scopes):
+            raise Forbidden(f"access token lacks one of the scopes: {' '.join(scopes)}")
+        return claims
+
+    return dependency
+
+
 def with_scope_or_terminal(scope: str):
     """Dependency: a terminal (identified by the gateway's x-terminal-id) or an OAuth token carrying `scope`.
 

@@ -8,3 +8,5 @@ target/
 graphify-out/
 .sandbox/
 node_modules/
+audit-worm/
+.verify-worm/

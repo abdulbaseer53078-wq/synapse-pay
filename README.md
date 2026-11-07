@@ -2,7 +2,7 @@
 
 **A Terminal-to-Cloud payment network that routes every payment method through one unified contract, designed to keep accepting payments when the internet drops.**
 
-> **Status:** Stage 1 in progress, sandbox only. Websites take card payments end to end (Synapse card frame → 3-D Secure → ISO 8583 → mock acquirer → signed webhook), and so do terminals via the API. Still to come: the terminal app (Step 5B) and the audit log (Step 7).
+> **Status:** Stage 1 in progress, sandbox only. Websites take card payments end to end (Synapse card frame → 3-D Secure → ISO 8583 → mock acquirer → signed webhook), and so do terminals via the API. Every state change is now recorded in a hash-chained, WORM-backed audit log (Step 7). Still to come: the terminal app (Step 5B).
 
 ---
 
@@ -63,7 +63,7 @@ The target design. What exists today is listed under Current status.
 
 | Component | Status |
 | :--- | :--- |
-| Unified Transaction Model (OpenAPI 3.1) | ✅ Step 1 (spec now v1.2.0, additive only) |
+| Unified Transaction Model (OpenAPI 3.1) | ✅ Step 1 (spec now v1.4.0, additive only) |
 | Terminal Registry, mTLS gateway (Envoy), heartbeats, authorization | ✅ Step 2 (`backend/`, `gateway/`) |
 | ISO 8583 parser / packer | ✅ Step 3 (`iso8583/`) |
 | Host Connector: mTLS link, pool, echo, audit, reversals | ✅ Step 4 (`host-connector/`) |
@@ -74,11 +74,12 @@ The target design. What exists today is listed under Current status.
 | Payment intents, hosted card frame, 3-D Secure (simulated), webhooks, terminal checkout | ✅ Step 6 |
 | Node.js server SDK, web SDK | ✅ Step 6 (`sdks/node`, `sdks/web`) |
 | Android SDK, Flutter plugin | 🟡 Step 6: written; Java core tested, Kotlin/Flutter not compiled yet |
+| Append-only audit log: hash chain, WORM storage, PAN masking, query API | ✅ Step 7 (`backend/app/audit/`, `infra/`; spec 1.4.0) |
 | Payment method adapters (method-agnostic transaction engine) | ✅ Step 8 (`backend/app/application/methods.py`, `backend/app/infrastructure/methods/`) |
 
 **Try it:** [take a test payment in 5 minutes](docs/quickstart.md).
 
-How it works: [terminal payments (Step 5)](docs/step5.md), [merchant SDKs (Step 6)](docs/step6.md), [payment method adapters (Step 8)](docs/step8.md).
+How it works: [terminal payments (Step 5)](docs/step5.md), [merchant SDKs (Step 6)](docs/step6.md), [the audit log (Step 7)](docs/step7.md), [payment method adapters (Step 8)](docs/step8.md).
 
 ## The contract
 
@@ -141,6 +142,7 @@ synapse-pay/
 ├── card-service/     # Simulated HSM + card flow; the only process that sees a card number (Rust)
 ├── sdks/             # Merchant SDKs: node (server), web, android, flutter
 ├── examples/         # A complete example shop
+├── infra/            # S3 Object Lock bucket for the audit WORM store (Terraform)
 ├── db/migrations/    # PostgreSQL schema
 └── docs/             # How each step works and how to run it
 ```

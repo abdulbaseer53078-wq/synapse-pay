@@ -9,7 +9,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import ConnectionPool
 
-from app.api import capabilities, errors, gateway, payment_intents, terminals, transactions
+from app.api import audit, capabilities, errors, gateway, payment_intents, terminals, transactions
+from app.application.audit import AuditQueryService
 from app.application.authorization import AuthorizationService
 from app.application.methods import MethodRegistry
 from app.application.queries import TerminalQueryService
@@ -22,6 +23,7 @@ from app.infrastructure.file_ca import FileCertificateAuthority
 from app.infrastructure.methods.card import CardMethodAdapter
 from app.infrastructure.card_service_client import HttpCardProcessor
 from app.infrastructure.postgres_api_keys import PostgresApiKeys
+from app.infrastructure.postgres_audit import PostgresAuditStore
 from app.infrastructure.postgres_intents import PostgresIntentRepository
 from app.infrastructure.postgres_terminals import PostgresTerminalRepository
 from app.infrastructure.postgres_transactions import PostgresTransactionRepository
@@ -81,10 +83,13 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.state.webhooks = webhooks
     app.state.allow_insecure_webhooks = settings.allow_insecure_webhooks
     app.state.queries = TerminalQueryService(repo)
+    # Read-only: the chain is built by the audit-ingest job, never by a request.
+    app.state.audit = AuditQueryService(PostgresAuditStore(pool))
     errors.install(app)
     app.include_router(terminals.router)
     app.include_router(transactions.router)
     app.include_router(capabilities.router)
     app.include_router(payment_intents.router)
+    app.include_router(audit.router)
     app.include_router(gateway.router)
     return app
