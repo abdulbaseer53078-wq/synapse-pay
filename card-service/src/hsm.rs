@@ -98,6 +98,12 @@ pub trait Hsm: Send + Sync {
     /// dialect has no DE 52 yet, so the block is checked here and not forwarded.
     fn verify_pin_block(&self, envelope: &str, pan: &ClearPan) -> Result<(), HsmError>;
 
+    /// Checks an encrypted card security code (CVV2/CVC2) is 3 or 4 digits.
+    /// shortcut: checked, not forwarded; the synthetic host dialect has no field for it yet.
+    fn verify_cvv(&self, _envelope: &str) -> Result<(), HsmError> {
+        Err(HsmError::Malformed("CVV checks are not supported"))
+    }
+
     /// The public checkout key as a JWK, for browsers and apps to encrypt card data to (sp2), if configured.
     fn checkout_public_jwk(&self) -> Option<String> {
         None
@@ -281,6 +287,14 @@ impl Hsm for SimHsm {
         let padding_ok = nibbles[length..].iter().all(|&n| n == 0x0f);
         if !(digits_ok && padding_ok) {
             return Err(HsmError::InvalidContent("not an ISO 9564 format 0 PIN block for this card"));
+        }
+        Ok(())
+    }
+
+    fn verify_cvv(&self, envelope: &str) -> Result<(), HsmError> {
+        let cvv = self.open(envelope, "cvv")?;
+        if !(3..=4).contains(&cvv.len()) || !cvv.iter().all(u8::is_ascii_digit) {
+            return Err(HsmError::InvalidContent("security code must be 3 or 4 digits"));
         }
         Ok(())
     }

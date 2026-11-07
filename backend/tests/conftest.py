@@ -43,7 +43,8 @@ def database_url():
 def db(database_url):
     with psycopg.connect(database_url, autocommit=True) as conn:
         conn.execute("TRUNCATE merchants, terminals, certificates, heartbeats, registration_tokens,"
-                     " activation_challenges, audit_log, certification_profiles, transactions, idempotency_keys CASCADE")
+                     " activation_challenges, audit_log, certification_profiles, transactions, idempotency_keys,"
+                     " payment_intents, api_keys, webhook_deliveries CASCADE")
         yield conn
 
 
@@ -103,7 +104,8 @@ def jwt_key():
 @pytest.fixture(scope="session")
 def settings(database_url, ca, jwt_key):
     public = jwt_key.public_key().public_bytes(PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()
-    return Settings(database_url, *ca, public, {name: re.compile(p) for name, p in DEFAULT_APPROVED_MODELS.items()})
+    return Settings(database_url, *ca, public, {name: re.compile(p) for name, p in DEFAULT_APPROVED_MODELS.items()},
+                    webhook_interval=0, allow_insecure_webhooks=True)  # tests deliver webhooks themselves
 
 
 @pytest.fixture
