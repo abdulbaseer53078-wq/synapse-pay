@@ -7,6 +7,10 @@ Two implementations behind one interface:
 * `S3WormSink` — S3 with Object Lock in COMPLIANCE mode: even the account root cannot delete or overwrite an
   object before its retention date. This is the production path and satisfies the five-year RBI retention.
 
+Epochs (Step 17.3): after a region failover the chain continues in a new key space, `<prefix>/epoch-NNNN/...`,
+so records written by the old region (and replicated here late) can never collide with the new region's. Epoch 1
+keeps the original keys. Keys sort epoch by epoch: `epoch-` sorts after the year folders.
+
 `shortcut:` the local sink is not WORM in the hardware sense — a user with root can rewrite the files. It is
 still content-addressed and checked by the verifier, so tampering is detectable, but only S3 Object Lock gives
 the "cannot be deleted by anyone" guarantee. Keep that distinction out of compliance claims.
@@ -25,7 +29,7 @@ class WormConflict(RuntimeError):
 
 
 class WormSink(Protocol):
-    def put(self, record: StoredEvent) -> str:
+    def put(self, record: StoredEvent, epoch: int = 1) -> str:
         """Durably write one record and return its key. Idempotent for identical content."""
 
     def read(self, key: str) -> dict: ...
@@ -34,10 +38,19 @@ class WormSink(Protocol):
         """Every stored record, in chain order (sequence ascending)."""
 
 
-def object_key(record: StoredEvent, prefix: str = "audit") -> str:
-    """Content-addressed and ordered: `audit/2026/11/07/000000000000000042-<hash>.json`."""
+def object_key(record: StoredEvent, prefix: str = "audit", epoch: int = 1) -> str:
+    """Content-addressed and ordered: `audit/2026/11/07/000000000000000042-<hash>.json`, or for a later epoch
+    `audit/epoch-0002/2026/11/07/...`."""
     stamp = record.event.timestamp.astimezone(UTC)
-    return f"{prefix}/{stamp:%Y/%m/%d}/{record.sequence:020d}-{record.hash}.json"
+    space = prefix if epoch == 1 else f"{prefix}/epoch-{epoch:04d}"
+    return f"{space}/{stamp:%Y/%m/%d}/{record.sequence:020d}-{record.hash}.json"
+
+
+def epoch_of_key(key: str, prefix: str = "audit") -> int:
+    """The epoch an object key belongs to (inverse of `object_key`'s key space)."""
+    rest = key[len(prefix) + 1:] if key.startswith(prefix + "/") else key
+    head = rest.split("/", 1)[0]
+    return int(head[len("epoch-"):]) if head.startswith("epoch-") else 1
 
 
 class LocalWormSink:
@@ -50,8 +63,8 @@ class LocalWormSink:
     def _path(self, key: str) -> Path:
         return self.root / key
 
-    def put(self, record: StoredEvent) -> str:
-        key = object_key(record, self.prefix)
+    def put(self, record: StoredEvent, epoch: int = 1) -> str:
+        key = object_key(record, self.prefix, epoch)
         path = self._path(key)
         body = record.to_json()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -100,8 +113,8 @@ class S3WormSink:
         self.prefix = prefix
         self.retention = timedelta(days=retention_days)
 
-    def put(self, record: StoredEvent) -> str:
-        key = object_key(record, self.prefix)
+    def put(self, record: StoredEvent, epoch: int = 1) -> str:
+        key = object_key(record, self.prefix, epoch)
         self.client.put_object(
             Bucket=self.bucket, Key=key, Body=record.to_json(),
             ContentType="application/json",

@@ -11,6 +11,7 @@ from typing import Protocol
 from app.audit.chain import GENESIS, compute_hash
 from app.audit.event import from_dict
 from app.infrastructure.audit_alerts import Alerter, NullAlerter
+from app.infrastructure.audit_worm import epoch_of_key
 
 
 @dataclass(frozen=True)
@@ -80,9 +81,33 @@ class AuditVerifier:
         return result
 
     def _verify(self) -> VerificationResult:
-        expected, prev, checked = 1, GENESIS, 0
+        """Walks every epoch in order. Within an epoch the chain must be unbroken. A new epoch (Step 17.3) must
+        start by linking to a record on the line verified so far, at or before its end: records the previous
+        epoch holds after that point are the lost window of a failover, kept and reported, not an error.
+        The database must then match the surviving line exactly."""
+        prefix = getattr(self.worm, "prefix", "audit")
+        # sequence -> (prev_hash, hash) for the surviving line.
+        # shortcut: holds every sequence in memory; stream with a bounded tail once the chain reaches ~10^7 events.
+        line: dict[int, tuple[str, str]] = {}
+        expected, prev, checked, epoch, orphaned = 1, GENESIS, 0, None, []
         for key, data in self.worm.records():
             sequence = int(data["sequence"])
+            key_epoch = epoch_of_key(key, prefix)
+            if epoch is not None and key_epoch < epoch:
+                return self._broken(checked, sequence, f"epoch went backwards at {key}")
+            if epoch is not None and key_epoch != epoch:
+                # A new epoch forks from the line at sequence - 1, which must exist (or be genesis).
+                if not 1 <= sequence <= expected:
+                    return self._broken(checked, sequence, f"epoch {key_epoch} starts at {sequence}, beyond the "
+                                                           f"previous epoch's end ({expected - 1})")
+                fork = line[sequence - 1][1] if sequence > 1 else GENESIS
+                if expected - sequence:
+                    orphaned.append(f"epoch {epoch} holds {expected - sequence} record(s) after sequence "
+                                    f"{sequence - 1} that epoch {key_epoch} replaced (a failover's lost window)")
+                for s in range(sequence, expected):
+                    del line[s]
+                expected, prev = sequence, fork
+            epoch = key_epoch
             if sequence != expected:
                 return self._broken(checked, sequence,
                                     f"sequence gap at {key}: expected {expected}, found {sequence}")
@@ -94,22 +119,27 @@ class AuditVerifier:
             if compute_hash(prev, event) != data.get("hash"):
                 return self._broken(checked, sequence,
                                     f"hash mismatch at sequence {sequence}: the stored content was altered")
+            line[sequence] = (data["prev_hash"], data["hash"])
             prev = data["hash"]
             expected += 1
             checked += 1
 
+        head = expected - 1
         db_head, db_hash = self.store.chain_head()
-        if db_head != checked or db_hash != prev:
+        if db_head != head or db_hash != prev:
             return self._broken(checked, None,
                                 f"database head ({db_head}, {db_hash[:12]}…) does not match the WORM chain "
-                                f"({checked}, {prev[:12]}…)")
+                                f"({head}, {prev[:12]}…)")
 
-        # Second pass: the queryable projection must be byte-for-byte the chain we just verified.
-        for (key, data), (sequence, db_prev, db_digest) in zip(self.worm.records(), self.store.stored_hashes()):
-            if (data["sequence"], data["prev_hash"], data["hash"]) != (sequence, db_prev, db_digest):
-                return self._broken(checked, sequence,
-                                    f"database row {sequence} disagrees with {key}")
-        return VerificationResult(True, checked, checked, None, None)
+        # Second pass: the queryable projection must be exactly the surviving line we just verified.
+        rows = 0
+        for sequence, db_prev, db_digest in self.store.stored_hashes():
+            rows += 1
+            if line.get(sequence) != (db_prev, db_digest):
+                return self._broken(checked, sequence, f"database row {sequence} disagrees with the WORM chain")
+        if rows != len(line):
+            return self._broken(checked, None, f"database has {rows} chained rows, the WORM line has {len(line)}")
+        return VerificationResult(True, checked, head, None, "; ".join(orphaned) or None)
 
     @staticmethod
     def _broken(checked: int, sequence: int | None, detail: str) -> VerificationResult:

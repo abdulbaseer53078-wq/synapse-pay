@@ -11,6 +11,9 @@ Exactly one instance; it holds the chain head lock.
 
 audit-publish runs forever, fanning the chained events out to audit.events for external consumers (Step 7.2).
 
+audit-new-epoch runs once, in the new region after an unplanned failover and before audit-ingest starts there
+(docs/step17.md): it moves the chain to a new key space so it can't fork inside the WORM bucket (Step 17.3).
+
 verify-audit runs once: it recomputes the whole chain from WORM storage and exits non-zero on a mismatch.
 Schedule it hourly (Step 7.7) — a chain nobody checks is a decoration.
 
@@ -37,7 +40,8 @@ from app.infrastructure.postgres_audit import PostgresAuditStore
 from app.infrastructure.postgres_terminals import PostgresTerminalRepository
 from app.infrastructure.postgres_transactions import PostgresTransactionRepository
 
-JOBS = ("refresh-health", "relay-events", "audit-ingest", "audit-publish", "verify-audit", "audit-seed", "upi-poll")
+JOBS = ("refresh-health", "relay-events", "audit-ingest", "audit-publish", "verify-audit", "audit-seed", "upi-poll",
+        "audit-new-epoch")
 USAGE = f"usage: python -m app.jobs {' | '.join(JOBS)}"
 
 
@@ -69,10 +73,13 @@ def main(argv: list[str]) -> None:
         elif job == "verify-audit":
             result = AuditVerifier(worm_from_env(), store, _alerter()).run()
             print(f"checked {result.checked} event(s), head {result.chain_head}: "
-                  f"{'OK' if result.ok else 'TAMPERED — ' + (result.detail or '')}")
+                  f"{'OK' if result.ok else 'TAMPERED'}{' — ' + result.detail if result.detail else ''}")
             sys.exit(0 if result.ok else 1)
         elif job == "audit-seed":
             _seed(pool)
+        elif job == "audit-new-epoch":
+            epoch, sequence, head = store.start_epoch(os.environ.get("AUDIT_EPOCH_REASON", "region failover"))
+            print(f"audit chain now in epoch {epoch}, continuing from sequence {sequence} ({head[:12]}…)")
 
 
 def _relay(pool: ConnectionPool) -> None:

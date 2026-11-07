@@ -7,7 +7,7 @@ happens inside that transaction, so the cursor never advances past an object tha
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
@@ -19,6 +19,9 @@ from app.infrastructure.postgres_terminals import _OUTBOX_LOCK
 
 _ROW = ("audit_id, event_id, occurred_at, actor_type, actor_id, entity_type, entity_id, action, from_status,"
         " to_status, reason, correlation_id, payload")
+# The audit_log entity the chain's own events (epoch starts) are recorded against.
+AUDIT_CHAIN_ENTITY = uuid5(NAMESPACE_URL, "urn:synapsepay:audit-chain")
+
 _VIEW = ("sequence, event_id, occurred_at, event_type, actor, entity_id, correlation_id, payload, prev_hash, hash")
 
 
@@ -43,8 +46,8 @@ class PostgresAuditStore:
         if limit <= 0:
             return 0
         with self.pool.connection() as conn, conn.transaction():
-            sequence, head, last_audit_id = conn.execute(
-                "SELECT last_sequence, last_hash, last_audit_id FROM audit_chain_head FOR UPDATE").fetchone()
+            sequence, head, last_audit_id, epoch = conn.execute(
+                "SELECT last_sequence, last_hash, last_audit_id, epoch FROM audit_chain_head FOR UPDATE").fetchone()
             # Same ordering rule as the registry relay: audit ids are assigned at INSERT but rows commit out of
             # order, so a batch read without this lock could pass a row that commits later with a lower id.
             # Writers hold it shared until commit; taking it exclusively waits them out. It is released before
@@ -63,7 +66,7 @@ class PostgresAuditStore:
                 # Sanitise before hashing: a masked value is part of the immutable record, not a view of it.
                 event = from_audit_row(row[1:])
                 stored = chain.append(replace(event, payload=sanitize(event.payload)))
-                worm_key = worm.put(stored)
+                worm_key = worm.put(stored, epoch)
                 self._insert(conn, stored, worm_key)
             conn.execute("UPDATE audit_chain_head SET last_sequence = %s, last_hash = %s, last_audit_id = %s",
                          (chain.sequence, chain.head, rows[-1][0]))
@@ -77,6 +80,25 @@ class PostgresAuditStore:
             " correlation_id, payload, prev_hash, hash, worm_key) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (stored.sequence, event.event_id, event.timestamp, event.event_type, event.actor, event.entity_id,
              event.correlation_id, Jsonb(event.payload), stored.prev_hash, stored.hash, worm_key))
+
+    def start_epoch(self, reason: str) -> tuple[int, int, str]:
+        """Starts the next chain epoch (Step 17.3); run once in the new region after a failover, before ingest.
+
+        Records the head this region inherited as an AUDIT_CHAIN_EPOCH_STARTED event, which ingest then chains
+        as the new epoch's record of where it forked. Returns (epoch, inherited sequence, inherited hash).
+        """
+        with self.pool.connection() as conn, conn.transaction():
+            sequence, head, epoch = conn.execute(
+                "SELECT last_sequence, last_hash, epoch FROM audit_chain_head FOR UPDATE").fetchone()
+            new_epoch = epoch + 1
+            conn.execute("UPDATE audit_chain_head SET epoch = %s", (new_epoch,))
+            conn.execute("SELECT pg_advisory_xact_lock_shared(%s)", (_OUTBOX_LOCK,))  # same rule as every audit writer
+            conn.execute(
+                "INSERT INTO audit_log (actor_type, entity_type, entity_id, action, from_status, to_status, reason,"
+                " correlation_id, payload) VALUES ('SYSTEM', 'audit_chain', %s, 'epoch_started', %s, %s, %s, %s, %s)",
+                (AUDIT_CHAIN_ENTITY, f"EPOCH_{epoch}", f"EPOCH_{new_epoch}", reason, "audit-chain",
+                 Jsonb({"epoch": new_epoch, "inherited_sequence": sequence, "inherited_hash": head})))
+            return new_epoch, sequence, head
 
     def chain_head(self) -> tuple[int, str]:
         with self.pool.connection() as conn:

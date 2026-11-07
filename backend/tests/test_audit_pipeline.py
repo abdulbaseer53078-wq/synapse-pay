@@ -29,8 +29,9 @@ def audit_pool(database_url):
 @pytest.fixture
 def clean_chain(db):
     """The chain tables are not in conftest's TRUNCATE list; a stale head would collide on sequence."""
-    db.execute("TRUNCATE audit_events")
-    db.execute("UPDATE audit_chain_head SET last_sequence = 0, last_hash = repeat('0', 64), last_audit_id = 0")
+    db.execute("TRUNCATE audit_events, audit_verification_runs")
+    db.execute("UPDATE audit_chain_head SET last_sequence = 0, last_hash = repeat('0', 64), last_audit_id = 0,"
+               " epoch = 1")
     db.execute("UPDATE audit_publish_cursor SET last_sequence = 0")
     return db
 
