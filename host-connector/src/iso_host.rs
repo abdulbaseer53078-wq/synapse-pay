@@ -385,6 +385,7 @@ fn parse_response(raw: &[u8], request_mti: &str, config: &IsoHostConfig) -> Resu
         decision,
         response_code: code.to_owned(),
         host_reference: msg.get_str(37).map(str::to_owned),
+        host_used: String::new(), // filled by the failover layer when more than one host is in play
     })
 }
 
