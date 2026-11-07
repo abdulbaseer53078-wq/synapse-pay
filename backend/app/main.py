@@ -12,6 +12,7 @@ from psycopg_pool import ConnectionPool
 from app.api import audit, capabilities, errors, gateway, payment_intents, terminals, transactions, upi_webhooks
 from app.application.audit import AuditQueryService
 from app.application.authorization import AuthorizationService
+from app.application.hosts import CachedHealth, HealthRegistry
 from app.application.methods import MethodRegistry
 from app.application.queries import TerminalQueryService
 from app.application.registration import RegistrationService
@@ -38,13 +39,36 @@ from app.infrastructure.postgres_webhooks import PostgresWebhookEvents
 from app.infrastructure.webhook_outbox import WebhookDispatcher
 
 
+def _card_health_source(settings):
+    """Rust's view of its own sockets (Step 14.6). Until that endpoint exists, this 404s and every card host
+    is reported DOWN — fail closed, which is the correct reading of "we cannot see the sockets"."""
+    url = settings.card_service_url.rstrip("/") + "/internal/v1/hosts/health"
+
+    def source():
+        import httpx
+
+        with httpx.Client(timeout=2.0) as client:
+            return client.get(url).raise_for_status().json()
+
+    return source
+
+
 def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | None = None) -> FastAPI:
     """`cards` replaces the card service client (tests)."""
     settings = settings or Settings.from_env()
     pool = ConnectionPool(settings.database_url, open=False)
 
     webhooks = WebhookDispatcher(pool, settings.allow_insecure_webhooks)
+    health = CachedHealth(HealthRegistry([], card_source=_card_health_source(settings),
+                                         card_host_ids=settings.card_hosts))
     stop = threading.Event()
+
+    def poll_health():
+        while not stop.wait(settings.health_poll_seconds):
+            try:
+                health.refresh()
+            except Exception as exc:  # a failed poll leaves the previous snapshot; nothing is invented
+                print(f"host health poll failed: {type(exc).__name__}")
 
     def deliver_webhooks():
         while not stop.wait(settings.webhook_interval):
@@ -60,6 +84,9 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
         if settings.webhook_interval > 0:
             worker = threading.Thread(target=deliver_webhooks, name="webhooks", daemon=True)
             worker.start()
+        # The router reads health.snapshot(); the poller is the only thing that talks to card-service.
+        health_worker = threading.Thread(target=poll_health, name="host-health", daemon=True)
+        health_worker.start()
         yield
         stop.set()
         if worker:
@@ -86,6 +113,7 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     rails = MethodRegistry([CardMethodAdapter(cards), upi, wallet, OfflineMethodAdapter()])
     methods = MethodRegistry([*rails.adapters(), QrMethodAdapter(rails)])
     app.state.methods = methods
+    app.state.health = health
     transaction_repo = PostgresTransactionRepository(pool)
     app.state.transactions = TransactionService(transaction_repo, app.state.authorization, methods)
     # Step 13: offline batch upload. Same engine, same rails; the signature and the age/limit checks are the
