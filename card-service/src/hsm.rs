@@ -104,7 +104,7 @@ impl SimHsm {
 
     pub fn from_hex(hex: &str) -> Result<Self, String> {
         let hex = hex.trim();
-        if hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !hex.len().is_multiple_of(2) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("BDK must be hex".into());
         }
         let bytes = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
@@ -166,7 +166,7 @@ fn luhn_ok(pan: &str) -> bool {
             if i % 2 == 1 { if d * 2 > 9 { d * 2 - 9 } else { d * 2 } } else { d }
         })
         .sum();
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 /// The 8-byte PAN field of an ISO 9564 format 0 block: 0000 + the 12 PAN digits before the check digit.
