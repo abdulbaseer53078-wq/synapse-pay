@@ -13,7 +13,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.application.registration import Forbidden, InvalidInput, NotFound, RegistrationError, Unauthenticated
 from app.application.transactions import (BadCardData, CardOutcomeUnknown, CardProcessor, CardRequest, CardResult,
@@ -62,6 +62,7 @@ class Intent:
 
 @dataclass(frozen=True)
 class NewIntent:
+    intent_id: UUID
     merchant_id: UUID
     idempotency_key: UUID
     request_hash: bytes
@@ -173,12 +174,14 @@ class PaymentIntentService:
                 raise Forbidden(f"terminal is {status}; only ACTIVE terminals can take payments")
         if body["currency"] != "INR":
             raise InvalidInput("only INR is supported for now")
+        intent_id = uuid4()
         new = NewIntent(
-            merchant_id=merchant_id, idempotency_key=UUID(body["idempotency_key"]), request_hash=request_hash(body),
+            intent_id=intent_id, merchant_id=merchant_id, idempotency_key=UUID(body["idempotency_key"]), request_hash=request_hash(body),
             amount=body["amount"], currency=body["currency"], capture_mode=body.get("capture_mode", "AUTO"),
             description=body.get("description"), metadata=body.get("metadata") or {},
             webhook_url=body.get("webhook_url"), terminal_id=terminal_id,
-            client_secret=f"pis_{secrets.token_hex(24)}", expires_at=self.now() + INTENT_TTL)
+            # The intent's ID is in its client secret, so client SDKs need only the secret.
+            client_secret=f"{public_intent_id(intent_id)}_secret_{secrets.token_urlsafe(24)}", expires_at=self.now() + INTENT_TTL)
         intent, created = self.repo.create(new)
         if intent is None:
             raise IntentConflict("idempotency_key was already used with a different request body")

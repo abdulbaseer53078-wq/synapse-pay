@@ -29,11 +29,11 @@ class PostgresIntentRepository:
         with self.pool.connection() as conn, conn.transaction():
             cur = conn.cursor(row_factory=dict_row)
             row = cur.execute(
-                f"INSERT INTO payment_intents (merchant_id, idempotency_key, request_hash, amount, currency,"
+                f"INSERT INTO payment_intents (intent_id, merchant_id, idempotency_key, request_hash, amount, currency,"
                 f" capture_mode, description, metadata, webhook_url, terminal_id, status, client_secret, expires_at)"
-                f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'REQUIRES_PAYMENT_METHOD', %s, %s)"
+                f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'REQUIRES_PAYMENT_METHOD', %s, %s)"
                 f" ON CONFLICT (merchant_id, idempotency_key) DO NOTHING RETURNING {_COLUMNS}",
-                (new.merchant_id, new.idempotency_key, new.request_hash, new.amount, new.currency, new.capture_mode,
+                (new.intent_id, new.merchant_id, new.idempotency_key, new.request_hash, new.amount, new.currency, new.capture_mode,
                  new.description, Jsonb(new.metadata), new.webhook_url, new.terminal_id, new.client_secret,
                  new.expires_at)).fetchone()
             if row is not None:
