@@ -208,8 +208,9 @@ def test_merchant_must_own_the_terminal(pay):
     assert r.status_code == 422 and r.json()["error_code"] == "MERCHANT_NOT_FOUND"
 
 
-def test_only_card_is_supported_for_now(pay):
-    r, _ = pay(payment_method="UPI", method_details={"vpa": "a@b"})
+def test_an_unregistered_method_is_422(pay):
+    # UPI and QR are adapters now (Steps 10A and 11); WALLET is not registered until Step 12.
+    r, _ = pay(payment_method="WALLET", method_details={"wallet_provider": "PAYTM", "wallet_token": "tok"})
     assert r.status_code == 422 and r.json()["error_code"] == "INVALID_REQUEST"
 
 

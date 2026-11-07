@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import ConnectionPool
 
-from app.api import audit, capabilities, errors, gateway, payment_intents, terminals, transactions
+from app.api import audit, capabilities, errors, gateway, payment_intents, terminals, transactions, upi_webhooks
 from app.application.audit import AuditQueryService
 from app.application.authorization import AuthorizationService
 from app.application.methods import MethodRegistry
@@ -17,16 +17,21 @@ from app.application.queries import TerminalQueryService
 from app.application.registration import RegistrationService
 from app.application.payment_intents import CheckoutCardProcessor, PaymentIntentService
 from app.application.transactions import TransactionService
+from app.application.upi_webhooks import UpiWebhookHandler
 from app.config import Settings
 from app.infrastructure.config_certification import ConfigCertificationRegistry
 from app.infrastructure.file_ca import FileCertificateAuthority
 from app.infrastructure.methods.card import CardMethodAdapter
+from app.infrastructure.methods.qr import QrMethodAdapter
+from app.infrastructure.methods.upi import UpiMethodAdapter
+from app.infrastructure.upi_client import HttpUpiPsp
 from app.infrastructure.card_service_client import HttpCardProcessor
 from app.infrastructure.postgres_api_keys import PostgresApiKeys
 from app.infrastructure.postgres_audit import PostgresAuditStore
 from app.infrastructure.postgres_intents import PostgresIntentRepository
 from app.infrastructure.postgres_terminals import PostgresTerminalRepository
 from app.infrastructure.postgres_transactions import PostgresTransactionRepository
+from app.infrastructure.postgres_webhooks import PostgresWebhookEvents
 from app.infrastructure.webhook_outbox import WebhookDispatcher
 
 
@@ -74,10 +79,17 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     )
     app.state.authorization = AuthorizationService(repo, certification)
     cards = cards or HttpCardProcessor(settings.card_service_url)
-    # Step 8: the one place a rail is chosen. Adding UPI is one more line here and a module beside card.py.
-    methods = MethodRegistry([CardMethodAdapter(cards)])
+    # Step 8: the one place a rail is chosen. Adding UPI was one line here and a module beside card.py.
+    upi = UpiMethodAdapter(HttpUpiPsp(settings.upi_psp_url), webhook_secret=settings.upi_webhook_secret or None)
+    # QR is a router: it dispatches to the rails above, so it is registered alongside them rather than instead.
+    rails = MethodRegistry([CardMethodAdapter(cards), upi])
+    methods = MethodRegistry([*rails.adapters(), QrMethodAdapter(rails)])
     app.state.methods = methods
-    app.state.transactions = TransactionService(PostgresTransactionRepository(pool), app.state.authorization, methods)
+    transaction_repo = PostgresTransactionRepository(pool)
+    app.state.transactions = TransactionService(transaction_repo, app.state.authorization, methods)
+    # Step 10B: the public callback. Same repository the engine uses, so the state change and its audit row
+    # are written by the same code path.
+    app.state.upi_webhooks = UpiWebhookHandler(upi, transaction_repo, PostgresWebhookEvents(pool))
     app.state.intents = PaymentIntentService(PostgresIntentRepository(pool), cards)
     app.state.api_keys = PostgresApiKeys(pool)
     app.state.webhooks = webhooks
@@ -91,5 +103,6 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.include_router(capabilities.router)
     app.include_router(payment_intents.router)
     app.include_router(audit.router)
+    app.include_router(upi_webhooks.router)
     app.include_router(gateway.router)
     return app

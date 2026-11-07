@@ -30,6 +30,12 @@ class Settings:
     approved_models: dict[str, re.Pattern]
     certified_firmware: dict[str, set[str]] = field(default_factory=lambda: _certified(DEFAULT_CERTIFIED_FIRMWARE))
     card_service_url: str = "http://127.0.0.1:7070"  # card-service/ (holds the HSM and the acquirer link)
+    # Step 10A: the UPI PSP. mock-psp/mock_psp.py speaks the same shapes locally.
+    upi_psp_url: str = "http://127.0.0.1:8080"
+    # A UPI payment still PENDING after this long is polled for its real status (webhooks can be lost).
+    upi_poll_stale_seconds: int = 300
+    # Shared secret the PSP signs webhooks with. Empty means the endpoint refuses every callback (fails closed).
+    upi_webhook_secret: str = ""
     # Seconds between webhook delivery runs; 0 turns the background deliverer off (tests drive it directly).
     webhook_interval: float = 2.0
     # http:// webhook URLs: local development and tests only.
@@ -55,6 +61,9 @@ class Settings:
             certified_firmware=_certified(
                 json.loads(os.environ.get("CERTIFIED_FIRMWARE", "null")) or DEFAULT_CERTIFIED_FIRMWARE),
             card_service_url=os.environ.get("CARD_SERVICE_URL", "http://127.0.0.1:7070"),
+            upi_psp_url=os.environ.get("UPI_PSP_URL", "http://127.0.0.1:8080"),
+            upi_poll_stale_seconds=int(os.environ.get("UPI_POLL_STALE_SECONDS", "300")),
+            upi_webhook_secret=os.environ.get("UPI_WEBHOOK_SECRET", ""),
             webhook_interval=float(os.environ.get("WEBHOOK_INTERVAL_SECONDS", "2")),
             allow_insecure_webhooks=os.environ.get("ALLOW_INSECURE_WEBHOOKS") == "1",
             audit_worm_backend=os.environ.get("AUDIT_WORM_BACKEND", "local"),

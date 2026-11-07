@@ -16,18 +16,20 @@ _SPENDING = ("PENDING", "AUTHORIZED", "CAPTURED", "SETTLED")
 
 
 def _audit_entity(conn: Connection, actor: str, actor_id: str | None, entity_type: str, entity_id: UUID,
-                  action: str, from_status: str | None, to_status: str, reason: str | None = None) -> None:
+                  action: str, from_status: str | None, to_status: str, reason: str | None = None,
+                  payload: dict | None = None) -> None:
     conn.execute("SELECT pg_advisory_xact_lock_shared(%s)", (_OUTBOX_LOCK,))
     conn.execute(
-        "INSERT INTO audit_log (actor_type, actor_id, entity_type, entity_id, action, from_status, to_status, reason)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-        (actor, actor_id, entity_type, entity_id, action, from_status, to_status, reason))
+        "INSERT INTO audit_log (actor_type, actor_id, entity_type, entity_id, action, from_status, to_status,"
+        " reason, payload) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (actor, actor_id, entity_type, entity_id, action, from_status, to_status, reason,
+         Jsonb(payload or {})))
 
 
 def _audit(conn: Connection, terminal_id: UUID, transaction_id: UUID, action: str, from_status: str | None,
-           to_status: str, reason: str | None = None) -> None:
+           to_status: str, reason: str | None = None, payload: dict | None = None) -> None:
     _audit_entity(conn, Actor.TERMINAL, str(terminal_id), "transaction", transaction_id, action, from_status,
-                  to_status, reason)
+                  to_status, reason, payload)
 
 
 def _response(row) -> dict:
@@ -113,17 +115,18 @@ class PostgresTransactionRepository:
                     raise _IntentRefused(why)
             (transaction_id,) = conn.execute(
                 "INSERT INTO transactions (idempotency_key, merchant_id, terminal_id, amount, currency, payment_method,"
-                " capture_mode, status, card_network, metadata, webhook_url, payment_intent_id)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, 'INITIATED', %s, %s, %s, %s) RETURNING transaction_id",
+                " capture_mode, status, card_network, metadata, webhook_url, payment_intent_id, qr_encoded_rail)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, 'INITIATED', %s, %s, %s, %s, %s) RETURNING transaction_id",
                 (txn.idempotency_key, txn.merchant_id, txn.terminal_id, txn.amount, txn.currency, txn.payment_method,
                  txn.capture_mode, txn.card_network, Jsonb(txn.metadata), txn.webhook_url,
-                 txn.payment_intent_id)).fetchone()
+                 txn.payment_intent_id, txn.qr_encoded_rail)).fetchone()
             if txn.payment_intent_id is not None:
                 conn.execute("UPDATE payment_intents SET transaction_id = %s WHERE intent_id = %s",
                              (transaction_id, txn.payment_intent_id))
             conn.execute("UPDATE idempotency_keys SET transaction_id = %s WHERE merchant_id = %s AND idempotency_key = %s",
                          (transaction_id, txn.merchant_id, txn.idempotency_key))
-            _audit(conn, txn.terminal_id, transaction_id, "transaction.create", None, "INITIATED")
+            _audit(conn, txn.terminal_id, transaction_id, "transaction.create", None, "INITIATED",
+                   payload={"qr_encoded_rail": txn.qr_encoded_rail} if txn.qr_encoded_rail else None)
             return Claim(transaction_id=transaction_id)
 
     @staticmethod
@@ -141,6 +144,34 @@ class PostgresTransactionRepository:
         conn.execute("UPDATE payment_intents SET status = 'PROCESSING', last_payment_error = NULL, updated_at = now()"
                      " WHERE intent_id = %s", (txn.payment_intent_id,))
         return None
+
+    def by_method_reference(self, reference: str, method: str | None = None) -> tuple[UUID, UUID, str] | None:
+        """(transaction_id, terminal_id, status) for a payment a network knows by its own id.
+
+        `method` is optional on purpose: a QR payment is stored as QR but carries a UPI PSP reference, so
+        filtering by method would make its own webhook unfindable. The network reference is unique.
+        """
+        if not reference:
+            return None
+        with self.pool.connection() as conn:
+            return conn.execute(
+                "SELECT transaction_id, terminal_id, status FROM transactions"
+                " WHERE method_reference = %s AND (%s::text IS NULL OR payment_method = %s)",
+                (reference, method, method)).fetchone()
+
+    def stale_pending(self, method: str, older_than_seconds: int,
+                      limit: int = 50) -> list[tuple[UUID, UUID, str | None]]:
+        """(transaction_id, terminal_id, method_reference) for payments a rail left PENDING too long.
+
+        The polling fallback's query: a UPI collect that never got its webhook. Indexed by
+        transactions_pending_idx (status) plus the method filter.
+        """
+        with self.pool.connection() as conn:
+            return conn.execute(
+                "SELECT transaction_id, terminal_id, method_reference FROM transactions"
+                " WHERE payment_method = %s AND status = 'PENDING'"
+                " AND updated_at < now() - make_interval(secs => %s)"
+                " ORDER BY updated_at LIMIT %s", (method, older_than_seconds, limit)).fetchall()
 
     def mark_pending(self, transaction_id: UUID, terminal_id: UUID) -> None:
         with self.pool.connection() as conn, conn.transaction():

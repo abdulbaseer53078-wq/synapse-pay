@@ -12,7 +12,7 @@ The contract is a `Protocol`, not an ABC: adapters stay structurally typed, test
 nothing has to inherit from a base class to participate.
 """
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Mapping, Protocol
 from uuid import UUID
 
 from app.application.registration import RegistrationError
@@ -49,6 +49,40 @@ class OutcomeUnknown(Exception):
     """Sent, and no answer came back: the network may have acted on it. Not an error to the client — the
     transaction becomes PENDING and reconciliation settles it. Deliberately not a RegistrationError, so it can
     never be rendered as a client-facing failure."""
+
+
+class WebhookRejected(Exception):
+    """An inbound callback failed verification. Carries the status the provider should see.
+
+    Not a RegistrationError: it is not part of the merchant API's error contract, and it must never be
+    rendered with the API's error taxonomy — a webhook caller is a network, not a merchant.
+    """
+
+    def __init__(self, status: int, code: str, message: str):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+
+
+@dataclass(frozen=True)
+class WebhookRequest:
+    """A callback exactly as it arrived.
+
+    `raw` is the point: JSON parsing reorders keys and normalises whitespace, so a signature computed over a
+    parsed-and-reserialised body will not match the one the provider signed. Adapters verify `raw`.
+    """
+
+    raw: bytes
+    headers: Mapping[str, str]  # lower-cased keys
+
+
+@dataclass(frozen=True)
+class WebhookUpdate:
+    """A verified callback: what the provider says happened, and the delivery id to deduplicate on."""
+
+    event_id: str
+    result: "MethodResult"
 
 
 @dataclass(frozen=True)
@@ -173,15 +207,19 @@ class PaymentMethodAdapter(Protocol):
     def capture(self, transaction_id: UUID, amount: int) -> MethodResult:
         """Capture a previously authorized payment. Raise UnsupportedOperation if the method cannot."""
 
-    def refund(self, transaction_id: UUID, amount: int) -> MethodResult:
-        """Refund all or part of a payment."""
+    def refund(self, transaction_id: UUID, amount: int, reference: str | None = None) -> MethodResult:
+        """Refund all or part of a payment. `reference` is the network's id, as the engine stored it —
+        adapters are stateless and cannot look it up."""
 
-    def status(self, transaction_id: UUID) -> MethodResult:
+    def status(self, transaction_id: UUID, reference: str | None = None) -> MethodResult:
         """Ask the network for the authoritative status (reconciliation, stuck payments)."""
 
-    def handle_webhook(self, payload: dict) -> MethodResult:
-        """Parse an asynchronous callback and return the state it moves the transaction to. Essential for
-        UPI and wallets, which answer the API before the network settles."""
+    def handle_webhook(self, request: WebhookRequest) -> WebhookUpdate:
+        """Verify an asynchronous callback (signature, timestamp) and return what it says happened.
+
+        Raises WebhookRejected if it cannot be trusted. Verification belongs here because only the adapter
+        knows the provider's signing scheme; applying the state change belongs to the engine.
+        """
 
 
 class MethodRegistry:
@@ -215,6 +253,10 @@ class MethodRegistry:
 
     def methods(self) -> list[str]:
         return sorted(self._adapters)
+
+    def adapters(self):
+        """The registered adapters, in registration order (used to build a second registry that adds one)."""
+        return list(self._adapters.values())
 
     def __contains__(self, method: str) -> bool:
         return method in self._adapters

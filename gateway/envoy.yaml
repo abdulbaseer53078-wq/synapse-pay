@@ -63,6 +63,37 @@ static_resources:
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    # PSP/NPCI-facing listener (Step 10B). A payment network is not a terminal: it has no client certificate
+    # from our CA and cannot present one, so this listener terminates server TLS only and has no ext_authz —
+    # the HMAC signature on the request is the authentication, checked by the backend.
+    # Separate listener rather than a disabled filter: the trust boundary is the socket, so nothing else can
+    # reach this port and no per-route exception can be forgotten.
+    - name: psp_webhooks
+      address: { socket_address: { address: 0.0.0.0, port_value: 8444 } }
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: false
+              common_tls_context:
+                tls_certificates:
+                  - certificate_chain: { filename: /etc/synapse/server.pem }
+                    private_key: { filename: /etc/synapse/server-key.pem }
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: psp_webhooks
+                route_config:
+                  virtual_hosts:
+                    - name: psp
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/api/v1/webhooks/" }
+                          route: { cluster: backend }
+                        # Everything else on this port is a 404, including /internal/*.
   clusters:
     - name: backend
       type: STRICT_DNS

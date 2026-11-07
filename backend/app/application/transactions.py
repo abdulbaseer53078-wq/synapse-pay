@@ -112,6 +112,7 @@ class NewTransaction:
     metadata: dict[str, str]
     webhook_url: str | None = None
     payment_intent_id: UUID | None = None  # set: this payment completes a terminal checkout (Step 6)
+    qr_encoded_rail: str | None = None  # set for QR: the rail the code actually encodes (Step 11)
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,17 @@ def system_error(code: str, message: str, retryable: bool) -> dict:
     return {"error_code": code, "error_message": message, "error_category": "SYSTEM_ERROR", "retryable": retryable}
 
 
+def apply_method_result(repo: TransactionRepository, transaction_id: UUID, terminal_id: UUID,
+                        result: MethodResult) -> dict:
+    """The one place an asynchronous method result becomes a transaction state.
+
+    The polling fallback uses it now, and the webhook handler will in Step 10B, so both go through the same
+    repository call as the synchronous path — same audit row, same webhook outbox, same idempotency handling.
+    An adapter never writes state itself; it reports, and this decides.
+    """
+    return repo.finish(transaction_id, terminal_id, result, result.status, result.error, store_response=True)
+
+
 @dataclass
 class TransactionService:
     repo: TransactionRepository
@@ -179,7 +191,8 @@ class TransactionService:
             terminal_id=caller_terminal, amount=body["amount"], currency=body["currency"],
             payment_method=body["payment_method"], capture_mode=body.get("capture_mode", "AUTO"),
             card_network=details.get("card_network"), metadata=body.get("metadata") or {},
-            webhook_url=body.get("webhook_url"), payment_intent_id=intent_id)
+            webhook_url=body.get("webhook_url"), payment_intent_id=intent_id,
+            qr_encoded_rail=details.get("qr_encoded_rail"))
 
         claim = self.repo.claim(txn)
         if claim.intent_error:
