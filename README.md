@@ -75,10 +75,11 @@ The target design. What exists today is listed under Current status.
 | Node.js server SDK, web SDK | ✅ Step 6 (`sdks/node`, `sdks/web`) |
 | Android SDK, Flutter plugin | 🟡 Step 6: written; Java core tested, Kotlin/Flutter not compiled yet |
 | Append-only audit log: hash chain, WORM storage, PAN masking, query API | ✅ Step 7 (`backend/app/audit/`, `infra/`; spec 1.4.0) |
+| Payment method adapters (method-agnostic transaction engine) | ✅ Step 8 (`backend/app/application/methods.py`, `backend/app/infrastructure/methods/`) |
 
 **Try it:** [take a test payment in 5 minutes](docs/quickstart.md).
 
-How it works: [terminal payments (Step 5)](docs/step5.md), [merchant SDKs (Step 6)](docs/step6.md), [the audit log (Step 7)](docs/step7.md).
+How it works: [terminal payments (Step 5)](docs/step5.md), [merchant SDKs (Step 6)](docs/step6.md), [the audit log (Step 7)](docs/step7.md), [payment method adapters (Step 8)](docs/step8.md).
 
 ## The contract
 
