@@ -5,7 +5,14 @@
   const intentId = location.pathname.split("/").pop();
   const clientSecret = query.get("client_secret");
   const parentOrigin = query.get("parent_origin");
+  // Mobile SDKs show this page in a WebView and watch for this URL instead of a message. Only this scheme is
+  // allowed, so the page can't be used to redirect anywhere else.
+  const returnUrl = query.get("return_url");
   const done = (status) => {
+    if (returnUrl && returnUrl.startsWith("synapsepay-sdk://")) {
+      location.href = `${returnUrl}?status=${encodeURIComponent(status)}`;
+      return;
+    }
     if (parentOrigin && /^https?:\/\/[^/]+$/.test(parentOrigin)) {
       window.parent.postMessage({ source: "synapsepay", type: "3ds-complete", status }, parentOrigin);
     }

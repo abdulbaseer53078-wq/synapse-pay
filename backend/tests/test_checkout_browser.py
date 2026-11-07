@@ -241,3 +241,21 @@ def test_web_pos_takes_payment_on_a_terminal(browser, shop, live, account, sdks,
         "payment_intent_id": job["payment_intent_id"]}, timeout=20)
     assert paid.status_code == 201 and paid.json()["status"] == "CAPTURED", paid.text
     assert result(page)["status"] == "SUCCEEDED"
+
+
+@pytest.mark.skipif(shutil.which("javac") is None, reason="javac not on PATH")
+def test_android_sdk_core_pays_against_the_real_stack(live, account, sdks, tmp_path, db):
+    """The Android SDK's Java core (card checks, sp2 encryption, API client) on a plain JVM: its envelope must
+    decrypt in the real card service's HSM, exactly like the browser frame's."""
+    android = ROOT / "sdks" / "android"
+    sources = [*map(str, (android / "synapsepay/src/main/java/com/synapsepay/android").glob("*.java")),
+               str(android / "jvm-test" / "ConfirmMain.java")]
+    built = subprocess.run(["javac", "-d", str(tmp_path), *sources], capture_output=True, text=True, timeout=120)
+    assert built.returncode == 0, built.stderr
+    intent = create_intent(sdks, live, account, amount=15000)
+    run = subprocess.run(["java", "-cp", str(tmp_path), "ConfirmMain", live[0], intent["client_secret"],
+                          FRICTIONLESS, "1230", "123"], capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    confirmed = json.loads(run.stdout)
+    assert confirmed["status"] == "SUCCEEDED" and confirmed["card"]["last4"] == "4242", run.stdout
+    assert db.execute("SELECT status FROM transactions").fetchone() == ("CAPTURED",)

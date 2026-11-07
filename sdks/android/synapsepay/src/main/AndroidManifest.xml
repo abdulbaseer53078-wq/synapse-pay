@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application>
+        <!-- The bank's 3-D Secure page. -->
+        <activity android:name="com.synapsepay.android.ThreeDsActivity" android:exported="false"
+                  android:theme="@style/Theme.AppCompat.DayNight.NoActionBar" />
+        <!-- Ready-made payment screen (used by the Flutter plugin). -->
+        <activity android:name="com.synapsepay.android.PaymentSheetActivity" android:exported="false"
+                  android:theme="@style/Theme.AppCompat.DayNight.Dialog" />
+    </application>
+</manifest>
