@@ -2,7 +2,7 @@
 
 **A Terminal-to-Cloud payment network that routes every payment method through one unified contract, designed to keep accepting payments when the internet drops.**
 
-> **Status:** spec-first. The API contract (OpenAPI 3.1, v1.0.0) is frozen and contract-tested. There is no backend yet.
+> **Status:** Stage 1 in progress. A card payment now runs end to end in tests: terminal request → API backend → card service (simulated HSM) → ISO 8583 host connector → mock acquirer, and back. The terminal app itself (Step 5B) is next.
 
 ---
 
@@ -25,9 +25,9 @@ Merchants already have payment gateways. What they need is a **brain that choose
 | Connectivity loss halts card-present acceptance | An on-premise edge node screens and accepts transactions locally, then syncs on reconnection |
 | Merchants are locked into one terminal vendor | A universal terminal adapter across Android POS, Linux POS, SoftPOS and more |
 
-## Architecture (planned)
+## Architecture
 
-None of these components are built yet; this is the target design.
+The target design. What exists today is listed under Current status.
 
 ```text
 ┌──────────────────────────────────────────────────────────┐
@@ -61,22 +61,19 @@ None of these components are built yet; this is the target design.
 
 ## Current status
 
-**Stage 1, Step 1 (Unified Transaction Model) is complete: spec v1.0.0.**
-
-The contract is frozen first so that every downstream component (parser, registry, adapters, SDK) is built against one source of truth.
-
 | Component | Status |
 | :--- | :--- |
-| Unified Transaction Model (OpenAPI 3.1) | ✅ v1.0.0 frozen |
-| Contract tests (Schemathesis against a Prism mock) | ✅ 121 generated cases passing |
-| Example and rule validator (`check_spec.py`) | ✅ 20 examples valid |
-| Terminal Registry | ⏳ Stage 1, Step 2 |
-| ISO 8583 parser / Host Connector | ⏳ Stage 1, Steps 3–4 |
-| Terminal adapter (first brand) | ⏳ Stage 1, Step 5 |
-| Merchant SDK | ⏳ Stage 1, Step 6 |
-| Audit log | ⏳ Stage 1, Step 7 |
+| Unified Transaction Model (OpenAPI 3.1) | ✅ Step 1 (spec now v1.2.0, additive only) |
+| Terminal Registry, mTLS gateway (Envoy), heartbeats, authorization | ✅ Step 2 (`backend/`, `gateway/`) |
+| ISO 8583 parser / packer | ✅ Step 3 (`iso8583/`) |
+| Host Connector: mTLS link, pool, echo, audit, reversals | ✅ Step 4 (`host-connector/`) |
+| `POST /api/v1/transactions` (card, terminals) | ✅ Step 5A (`backend/`) |
+| Card service + simulated HSM | ✅ Step 5A (`card-service/`) |
+| Terminal app (Android, simulated card reader) | ⏳ Step 5B |
+| Terminal app on PAX hardware | ⏳ Step 5C |
+| Merchant SDK | ⏳ Step 6 |
 
-The contract tests prove the spec is internally consistent, not that any backend behaves correctly. Idempotency replay, registry lookups and state transitions need the real backend and will be covered by Stage 1 integration tests.
+How a card payment flows, and how to run it: [`docs/step5.md`](docs/step5.md).
 
 ## The contract
 
@@ -131,13 +128,14 @@ v1.0.0 is frozen. Any breaking change to the contract goes through a versioned p
 
 ```text
 synapse-pay/
-├── spec/
-│   ├── openapi.yaml        # The Unified Transaction Model (v1.0.0)
-│   ├── check_spec.py       # Validates every example and the contract's rules
-│   ├── contract-test.sh    # Runs the full contract test suite
-│   └── requirements.txt    # Python dependencies for the tests
-├── redocly.yaml            # Linter config, with documented suppressions
-└── README.md
+├── spec/             # The Unified Transaction Model (OpenAPI) and its contract tests
+├── backend/          # FastAPI: terminal registry, transactions API (Python)
+├── gateway/          # Envoy config: terminal mTLS, registry check before the backend
+├── iso8583/          # ISO 8583 message library (Rust)
+├── host-connector/   # Acquirer connection: mTLS, pool, echo, audit, reversals (Rust) + mock acquirer
+├── card-service/     # Simulated HSM + card flow; the only process that sees a card number (Rust)
+├── db/migrations/    # PostgreSQL schema
+└── docs/             # How each step works and how to run it
 ```
 
 ## Running the contract tests

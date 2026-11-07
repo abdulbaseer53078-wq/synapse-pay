@@ -29,6 +29,7 @@ class Settings:
     jwt_public_key: str  # PEM; verifies merchant and admin OAuth access tokens
     approved_models: dict[str, re.Pattern]
     certified_firmware: dict[str, set[str]] = field(default_factory=lambda: _certified(DEFAULT_CERTIFIED_FIRMWARE))
+    card_service_url: str = "http://127.0.0.1:7070"  # card-service/ (holds the HSM and the acquirer link)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -42,4 +43,5 @@ class Settings:
             approved_models={name: re.compile(pattern) for name, pattern in models.items()},
             certified_firmware=_certified(
                 json.loads(os.environ.get("CERTIFIED_FIRMWARE", "null")) or DEFAULT_CERTIFIED_FIRMWARE),
+            card_service_url=os.environ.get("CARD_SERVICE_URL", "http://127.0.0.1:7070"),
         )
