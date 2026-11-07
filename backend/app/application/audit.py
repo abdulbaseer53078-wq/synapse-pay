@@ -1,0 +1,116 @@
+"""Audit query and integrity verification (Steps 7.6 and 7.7).
+
+The query side is intentionally a thin service: support asks "what happened to this payment", and the answer
+is one indexed range scan over the chained projection. The verifier is where the real logic lives — it
+re-reads the WORM objects and recomputes the chain from genesis.
+"""
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Protocol
+
+from app.audit.chain import GENESIS, compute_hash
+from app.audit.event import from_dict
+from app.infrastructure.audit_alerts import Alerter, NullAlerter
+
+
+@dataclass(frozen=True)
+class VerificationResult:
+    ok: bool
+    checked: int
+    chain_head: int
+    first_bad_sequence: int | None
+    detail: str | None
+
+
+class AuditStore(Protocol):
+    def search(self, correlation_id: str | None = None, entity_id: str | None = None,
+               event_type: str | None = None, start: datetime | None = None, end: datetime | None = None,
+               after_sequence: int | None = None, limit: int = 100) -> tuple[list[dict], int | None]: ...
+    def chain_head(self) -> tuple[int, str]: ...
+    def stored_hashes(self): ...
+    def record_verification(self, started_at: datetime, events_checked: int, chain_head: int, status: str,
+                            detail: str | None = None): ...
+
+
+class AuditQueryService:
+    def __init__(self, store: AuditStore):
+        self.store = store
+
+    def search(self, **filters) -> tuple[list[dict], int | None]:
+        return self.store.search(**filters)
+
+    def timeline(self, correlation_id: str, limit: int = 100) -> list[dict]:
+        """Everything that happened for one correlation id, oldest first. This is the support workflow."""
+        data, _ = self.store.search(correlation_id=correlation_id, limit=limit)
+        return data
+
+    def head(self) -> dict:
+        sequence, digest = self.store.chain_head()
+        return {"sequence": sequence, "hash": digest}
+
+
+class AuditVerifier:
+    """Recomputes the chain from the immutable copies and checks the database agrees.
+
+    Two independent passes, because they catch different attacks:
+      1. the WORM objects must form an unbroken chain from genesis (catches an edited or missing object);
+      2. the database's sequence/hash pairs must match those objects (catches an edited database row).
+    """
+
+    def __init__(self, worm, store: AuditStore, alerter: Alerter | None = None):
+        self.worm = worm
+        self.store = store
+        self.alerter = alerter or NullAlerter()
+
+    def run(self) -> VerificationResult:
+        started = datetime.now(UTC)
+        try:
+            result = self._verify()
+        except Exception as exc:  # an unreadable store is a failure, but must not crash the job
+            detail = f"verification error: {type(exc).__name__}: {exc}"
+            self.store.record_verification(started, 0, 0, "ERROR", detail)
+            self.alerter.tamper_detected(detail, 0, None)
+            return VerificationResult(False, 0, 0, None, detail)
+
+        self.store.record_verification(started, result.checked, result.chain_head,
+                                       "OK" if result.ok else "TAMPERED", result.detail)
+        if not result.ok:
+            self.alerter.tamper_detected(result.detail or "chain mismatch", result.checked,
+                                         result.first_bad_sequence)
+        return result
+
+    def _verify(self) -> VerificationResult:
+        expected, prev, checked = 1, GENESIS, 0
+        for key, data in self.worm.records():
+            sequence = int(data["sequence"])
+            if sequence != expected:
+                return self._broken(checked, sequence,
+                                    f"sequence gap at {key}: expected {expected}, found {sequence}")
+            event = from_dict(data)
+            if data.get("prev_hash") != prev:
+                return self._broken(checked, sequence,
+                                    f"broken link at sequence {sequence}: prev_hash does not match sequence "
+                                    f"{sequence - 1}")
+            if compute_hash(prev, event) != data.get("hash"):
+                return self._broken(checked, sequence,
+                                    f"hash mismatch at sequence {sequence}: the stored content was altered")
+            prev = data["hash"]
+            expected += 1
+            checked += 1
+
+        db_head, db_hash = self.store.chain_head()
+        if db_head != checked or db_hash != prev:
+            return self._broken(checked, None,
+                                f"database head ({db_head}, {db_hash[:12]}…) does not match the WORM chain "
+                                f"({checked}, {prev[:12]}…)")
+
+        # Second pass: the queryable projection must be byte-for-byte the chain we just verified.
+        for (key, data), (sequence, db_prev, db_digest) in zip(self.worm.records(), self.store.stored_hashes()):
+            if (data["sequence"], data["prev_hash"], data["hash"]) != (sequence, db_prev, db_digest):
+                return self._broken(checked, sequence,
+                                    f"database row {sequence} disagrees with {key}")
+        return VerificationResult(True, checked, checked, None, None)
+
+    @staticmethod
+    def _broken(checked: int, sequence: int | None, detail: str) -> VerificationResult:
+        return VerificationResult(False, checked, 0, sequence, detail)
