@@ -1,0 +1,24 @@
+[package]
+name = "card_service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+publish = false
+description = "Card transaction service (Stage 1, Step 5): decrypts terminal card data in the (simulated) HSM and sends it to the acquirer host. The only process that ever holds a clear card number."
+
+[dependencies]
+host_connector = { path = "../host-connector" }
+iso8583 = { path = "../iso8583" }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+zeroize = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
