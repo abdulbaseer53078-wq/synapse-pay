@@ -39,6 +39,12 @@ class UnsupportedOperation(RegistrationError):
     code = "INVALID_REQUEST"
 
 
+class CapabilityNotSupported(RegistrationError):
+    """The method exists but cannot do this: a partial refund on a rail that has none, a chargeback on UPI.
+    The engine rejects it from the descriptor, without calling the adapter at all."""
+    code = "INVALID_REQUEST"
+
+
 class OutcomeUnknown(Exception):
     """Sent, and no answer came back: the network may have acted on it. Not an error to the client — the
     transaction becomes PENDING and reconciliation settles it. Deliberately not a RegistrationError, so it can
@@ -77,10 +83,80 @@ class MethodResult:
         return bool(self.error and self.error.get("retryable"))
 
 
+@dataclass(frozen=True)
+class DisputeRules:
+    framework: str  # CARD_SCHEME | NPCI_UPI | NONE
+    dispute_window_days: int
+    resolution_timeline_days: int | None = None
+
+    def to_dict(self) -> dict:
+        body = {"framework": self.framework, "dispute_window_days": self.dispute_window_days}
+        if self.resolution_timeline_days is not None:
+            body["resolution_timeline_days"] = self.resolution_timeline_days
+        return body
+
+
+@dataclass(frozen=True)
+class Transition:
+    from_status: str
+    to_status: str
+
+    def to_dict(self) -> dict:
+        return {"from": self.from_status, "to": self.to_status}
+
+
+@dataclass(frozen=True)
+class CapabilityDescriptor:
+    """What a method can do (spec: CapabilityDescriptor). Static per method: the SDK caches it.
+
+    Every downstream decision branches on these values instead of on the method name — dispute management
+    reading supports_chargeback, refunds reading supports_partial_refund, the offline edge reading
+    supports_offline. Adding a rail never adds a branch to those services.
+    """
+
+    payment_method: str
+    supports_chargeback: bool
+    supports_recurring: bool
+    supports_offline: bool
+    supports_refund: bool
+    supports_partial_refund: bool
+    supports_partial_capture: bool
+    settlement_timeline: str
+    auth_type: str
+    dispute_rules: DisputeRules
+    transitions: tuple[Transition, ...]
+
+    def supports(self, capability: str) -> bool:
+        """`supports("partial_refund")` and `supports("supports_partial_refund")` both work."""
+        name = capability if capability.startswith("supports_") else f"supports_{capability}"
+        if name not in {"supports_chargeback", "supports_recurring", "supports_offline", "supports_refund",
+                        "supports_partial_refund", "supports_partial_capture"}:
+            raise ValueError(f"{capability} is not a capability")
+        return bool(getattr(self, name))
+
+    def to_dict(self) -> dict:
+        return {
+            "payment_method": self.payment_method,
+            "supports_chargeback": self.supports_chargeback,
+            "supports_recurring": self.supports_recurring,
+            "supports_offline": self.supports_offline,
+            "supports_refund": self.supports_refund,
+            "supports_partial_refund": self.supports_partial_refund,
+            "supports_partial_capture": self.supports_partial_capture,
+            "settlement_timeline": self.settlement_timeline,
+            "auth_type": self.auth_type,
+            "dispute_rules": self.dispute_rules.to_dict(),
+            "transitions": [t.to_dict() for t in self.transitions],
+        }
+
+
 class PaymentMethodAdapter(Protocol):
     """The contract every method implements. The engine calls nothing else on an adapter."""
 
     method: str  # the payment_method value this adapter serves, e.g. "CARD"
+
+    def capabilities(self) -> CapabilityDescriptor:
+        """What this method can do. Static, so it is safe to call on every request."""
 
     def validate(self, details: dict) -> dict:
         """Return normalised method_details, or raise InvalidMethodDetails."""
@@ -121,6 +197,18 @@ class MethodRegistry:
         if adapter is None:
             supported = ", ".join(sorted(self._adapters)) or "none"
             raise MethodNotSupported(f"{method} isn't supported yet; supported: {supported}")
+        return adapter
+
+    def require(self, method: str, capability: str) -> PaymentMethodAdapter:
+        """The adapter for `method`, or CapabilityNotSupported if the rail cannot do `capability`.
+
+        Call this before the adapter is asked to do anything: a partial refund on a method without partial
+        refunds is decided from the descriptor, so the network is never touched.
+        """
+        adapter = self.for_method(method)
+        if not adapter.capabilities().supports(capability):
+            what = capability.removeprefix("supports_").replace("_", " ")
+            raise CapabilityNotSupported(f"{method} doesn't support {what}")
         return adapter
 
     def methods(self) -> list[str]:

@@ -8,10 +8,40 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.application.methods import (AdapterUnavailable, InvalidMethodDetails, MethodRequest, MethodResult,
-                                     OutcomeUnknown, UnsupportedOperation)
+from app.application.methods import (AdapterUnavailable, CapabilityDescriptor, DisputeRules, InvalidMethodDetails,
+                                     MethodRequest, MethodResult, OutcomeUnknown, Transition, UnsupportedOperation)
 from app.application.transactions import (BadCardData, CardOutcomeUnknown, CardProcessor, CardRequest,
                                           CardServiceUnavailable)
+
+
+# The spec's CardCapabilities example, as code. Card present is synchronous, settles T+1, and is the only rail
+# in v1 with chargebacks — which is exactly what dispute management needs to know without asking a card expert.
+CARD_CAPABILITIES = CapabilityDescriptor(
+    payment_method="CARD",
+    supports_chargeback=True,
+    supports_recurring=True,
+    supports_offline=True,  # the edge node accepts cards while the link is down
+    supports_refund=True,
+    supports_partial_refund=True,
+    supports_partial_capture=True,
+    settlement_timeline="T+1",
+    auth_type="issuer_authorization",
+    dispute_rules=DisputeRules(framework="CARD_SCHEME", dispute_window_days=120, resolution_timeline_days=45),
+    transitions=(
+        Transition("INITIATED", "PENDING"),
+        Transition("PENDING", "AUTHORIZED"),
+        Transition("PENDING", "FAILED"),
+        Transition("AUTHORIZED", "CAPTURED"),
+        Transition("AUTHORIZED", "VOIDED"),
+        Transition("CAPTURED", "SETTLED"),
+        Transition("CAPTURED", "REFUNDED"),
+        Transition("CAPTURED", "PARTIALLY_REFUNDED"),
+        Transition("SETTLED", "REFUNDED"),
+        Transition("SETTLED", "PARTIALLY_REFUNDED"),
+        Transition("PARTIALLY_REFUNDED", "PARTIALLY_REFUNDED"),
+        Transition("PARTIALLY_REFUNDED", "REFUNDED"),
+    ),
+)
 
 
 class CardDetails(BaseModel):
@@ -40,6 +70,9 @@ class CardMethodAdapter:
 
     def __init__(self, processor: CardProcessor):
         self.processor = processor
+
+    def capabilities(self) -> CapabilityDescriptor:
+        return CARD_CAPABILITIES
 
     def validate(self, details: dict) -> dict:
         """Field paths and reasons only: never echo the values back, they are card data."""

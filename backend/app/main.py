@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import ConnectionPool
 
-from app.api import errors, gateway, payment_intents, terminals, transactions
+from app.api import capabilities, errors, gateway, payment_intents, terminals, transactions
 from app.application.authorization import AuthorizationService
 from app.application.methods import MethodRegistry
 from app.application.queries import TerminalQueryService
@@ -84,6 +84,7 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     errors.install(app)
     app.include_router(terminals.router)
     app.include_router(transactions.router)
+    app.include_router(capabilities.router)
     app.include_router(payment_intents.router)
     app.include_router(gateway.router)
     return app
