@@ -142,6 +142,18 @@ class PostgresTransactionRepository:
                      " WHERE intent_id = %s", (txn.payment_intent_id,))
         return None
 
+    def by_method_reference(self, method: str, reference: str) -> tuple[UUID, UUID, str] | None:
+        """(transaction_id, terminal_id, status) for a payment a network knows by its own id.
+
+        The webhook handler's lookup: the PSP tells us `psp_...`, not our transaction id.
+        """
+        if not reference:
+            return None
+        with self.pool.connection() as conn:
+            return conn.execute(
+                "SELECT transaction_id, terminal_id, status FROM transactions"
+                " WHERE payment_method = %s AND method_reference = %s", (method, reference)).fetchone()
+
     def stale_pending(self, method: str, older_than_seconds: int,
                       limit: int = 50) -> list[tuple[UUID, UUID, str | None]]:
         """(transaction_id, terminal_id, method_reference) for payments a rail left PENDING too long.

@@ -96,5 +96,5 @@ class BaseMethodAdapter(ABC):
     def status(self, transaction_id: UUID, reference: str | None = None) -> MethodResult:
         raise UnsupportedOperation(f"{self.method} has no status lookup yet")
 
-    def handle_webhook(self, payload: dict) -> MethodResult:
+    def handle_webhook(self, request) -> "WebhookUpdate":
         raise UnsupportedOperation(f"{self.method} has no asynchronous callback")

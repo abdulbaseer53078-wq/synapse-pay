@@ -11,15 +11,22 @@ Declines are results, not exceptions: a PSP 4xx is an answer ("no"), and the eng
 to route. Exceptions are reserved for "we could not ask", which the base class turns into a retryable
 AdapterUnavailable.
 """
+import hashlib
+import hmac
+import json
+import time
 from typing import Literal, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.application.methods import (AdapterUnavailable, CapabilityDescriptor, DisputeRules, InvalidMethodDetails,
-                                     MethodRequest, MethodResult, Transition, UnsupportedOperation)
+                                     MethodRequest, MethodResult, Transition, UnsupportedOperation, WebhookRejected,
+                                     WebhookRequest, WebhookUpdate)
 from app.infrastructure.methods.base import BaseMethodAdapter
 from app.infrastructure.upi_client import PspDeclined, PspUnavailable
+
+REPLAY_WINDOW_SECONDS = 300
 
 UPI_CAPABILITIES = CapabilityDescriptor(
     payment_method="UPI",
@@ -90,8 +97,12 @@ class UpiMethodAdapter(BaseMethodAdapter):
     DETAILS = UpiDetails
     ERROR_MAP = {PspUnavailable: lambda exc: AdapterUnavailable(exc.message)}
 
-    def __init__(self, psp: UpiPsp):
+    def __init__(self, psp: UpiPsp, webhook_secret: str | None = None, clock=time.time,
+                 replay_window: int = REPLAY_WINDOW_SECONDS):
         self.psp = psp
+        self.webhook_secret = webhook_secret
+        self.clock = clock  # injectable so the replay window can be tested without sleeping
+        self.replay_window = replay_window
 
     def validate(self, details: dict) -> dict:
         clean = super().validate(details)
@@ -135,3 +146,51 @@ class UpiMethodAdapter(BaseMethodAdapter):
         except PspDeclined as declined:
             return _failure(declined.code, declined.message, declined.category, declined.retryable)
         return MethodResult(status="REFUNDED", method_reference=reply.get("refund_id", reference))
+
+    # --- 10B: inbound webhook ---------------------------------------------------------------------------
+
+    def handle_webhook(self, request: WebhookRequest) -> WebhookUpdate:
+        """Verify the PSP's signature and timestamp, then normalise. Never touches the database.
+
+        The signature covers "<timestamp>.<raw body>", not the body alone. A body-only signature can be
+        replayed by pairing a captured signature with a fresh timestamp header; binding the two means the
+        whole thing falls outside the window together.
+        """
+        self._verify(request)
+        try:
+            body = json.loads(request.raw or b"{}")
+        except ValueError:
+            raise WebhookRejected(400, "INVALID_JSON", "body is not JSON") from None
+        if not isinstance(body, dict):
+            raise WebhookRejected(400, "INVALID_JSON", "body must be a JSON object")
+
+        event_id = str(body.get("event_id") or "")
+        psp_id = str(body.get("psp_transaction_id") or "")
+        state = body.get("status")
+        if not event_id or not psp_id or state not in ("SUCCESS", "FAILURE"):
+            raise WebhookRejected(400, "INVALID_PAYLOAD",
+                                  "event_id, psp_transaction_id and a known status are required")
+        return WebhookUpdate(event_id=event_id, result=_status_result({
+            "psp_transaction_id": psp_id, "status": state, "reason": body.get("reason"), "rrn": body.get("rrn")}))
+
+    def _verify(self, request: WebhookRequest) -> None:
+        if not self.webhook_secret:
+            # Fail closed: an unconfigured deployment must not accept unsigned callbacks.
+            raise WebhookRejected(503, "WEBHOOK_NOT_CONFIGURED",
+                                  "this deployment has no UPI webhook secret configured")
+        timestamp = request.headers.get("x-upi-timestamp")
+        signature = request.headers.get("x-upi-signature")
+        if not timestamp or not signature:
+            raise WebhookRejected(401, "MISSING_SIGNATURE",
+                                  "X-UPI-Timestamp and X-UPI-Signature are required")
+        try:
+            sent_at = int(timestamp)
+        except ValueError:
+            raise WebhookRejected(400, "INVALID_TIMESTAMP", "X-UPI-Timestamp must be unix seconds") from None
+        if abs(int(self.clock()) - sent_at) > self.replay_window:
+            raise WebhookRejected(400, "STALE_TIMESTAMP",
+                                  f"timestamp is more than {self.replay_window}s from now")
+        expected = hmac.new(self.webhook_secret.encode(), f"{timestamp}.".encode() + request.raw,
+                            hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, signature.strip().lower()):
+            raise WebhookRejected(401, "BAD_SIGNATURE", "signature does not match the body")

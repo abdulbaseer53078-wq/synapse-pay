@@ -155,13 +155,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, record)
 
         if self.path == "/mock/trigger-webhook":
-            psp_id, url = body.get("psp_transaction_id"), body.get("url")
+            psp_id = body.get("psp_transaction_id")
             with _lock:
                 record = _collects.get(psp_id)
-            if record is None or not url:
-                return self._send(400, {"error": {"code": "BAD_TRIGGER", "message": "psp_transaction_id and url"}})
-            return self._send(200, {"delivered": False, "note": "webhook delivery lands in Step 10B",
-                                    "payload": record, "signature": _signed(json.dumps(record).encode())})
+            if record is None:
+                return self._send(400, {"error": {"code": "BAD_TRIGGER", "message": "psp_transaction_id"}})
+            # Exactly what the real delivery looks like: sign "<timestamp>.<raw body>", so a test can replay
+            # these bytes and headers at the endpoint without reconstructing anything.
+            settled = record["status"] if record["status"] in ("SUCCESS", "FAILURE") else "SUCCESS"
+            delivery = {
+                "event_id": f"evt_{uuid.uuid4().hex}", "psp_transaction_id": psp_id,
+                "status": body.get("status") or settled,
+                "reason": record.get("reason"), "rrn": "123456789012",
+            }
+            raw = json.dumps(delivery).encode()
+            timestamp = str(int(time.time()))
+            return self._send(200, {"body": raw.decode(), "headers": {
+                "X-UPI-Timestamp": timestamp, "X-UPI-Signature": _signed(f"{timestamp}.".encode() + raw)}})
 
         self._send(404, {"error": {"code": "NOT_FOUND", "message": self.path}})
 
