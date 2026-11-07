@@ -11,14 +11,17 @@ tracked in docs/step12.md rather than smuggled in as a schema violation.
 The client lives here rather than in its own module because it is two calls and the wallet vocabulary is only
 used here; `upi_client.py` is separate because UPI and QR both speak it.
 """
+import json
+import time
 from typing import Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.application.methods import (AdapterUnavailable, CapabilityDescriptor, DisputeRules, MethodRequest,
-                                     MethodResult, Transition)
+                                     MethodResult, Transition, WebhookRejected, WebhookRequest, WebhookUpdate)
 from app.infrastructure.methods.base import BaseMethodAdapter
+from app.infrastructure.webhook_signature import REPLAY_WINDOW_SECONDS, verify_signature
 
 DEFAULT_TIMEOUT = httpx.Timeout(10.0, connect=1.0)
 
@@ -147,8 +150,37 @@ class WalletMethodAdapter(BaseMethodAdapter):
     DETAILS = WalletDetails
     ERROR_MAP = {WalletUnavailable: lambda exc: AdapterUnavailable(exc.message)}
 
-    def __init__(self, provider: HttpWallet):
+    def __init__(self, provider: HttpWallet, webhook_secret: str | None = None, clock=time.time,
+                 replay_window: int = REPLAY_WINDOW_SECONDS):
         self.provider = provider
+        self.webhook_secret = webhook_secret
+        self.clock = clock
+        self.replay_window = replay_window
+
+    def handle_webhook(self, request: WebhookRequest) -> WebhookUpdate:
+        """Verify the provider's callback and normalise it. Same verifier UPI uses, different headers."""
+        verify_signature(request.raw, request.headers, self.webhook_secret,
+                         timestamp_header="X-Wallet-Timestamp", signature_header="X-Wallet-Signature",
+                         label="wallet", now=self.clock, window=self.replay_window)
+        try:
+            body = json.loads(request.raw or b"{}")
+        except ValueError:
+            raise WebhookRejected(400, "INVALID_JSON", "body is not JSON") from None
+        if not isinstance(body, dict):
+            raise WebhookRejected(400, "INVALID_JSON", "body must be a JSON object")
+        event_id = str(body.get("event_id") or "")
+        wallet_id = str(body.get("wallet_transaction_id") or "")
+        state = body.get("status")
+        if not event_id or not wallet_id or state not in ("SUCCESS", "FAILURE"):
+            raise WebhookRejected(400, "INVALID_PAYLOAD",
+                                  "event_id, wallet_transaction_id and a known status are required")
+        if state == "SUCCESS":
+            result = MethodResult(status="SETTLED", method_reference=wallet_id)
+        else:
+            result = MethodResult(status="FAILED", method_reference=wallet_id, error={
+                "error_code": "WALLET_DECLINED", "error_message": body.get("reason") or "the wallet declined",
+                "error_category": "HARD_DECLINE", "retryable": False})
+        return WebhookUpdate(event_id=event_id, result=result)
 
     def send(self, request: MethodRequest) -> MethodResult:
         token = request.details.get("wallet_token")

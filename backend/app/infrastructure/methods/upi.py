@@ -174,23 +174,7 @@ class UpiMethodAdapter(BaseMethodAdapter):
             "psp_transaction_id": psp_id, "status": state, "reason": body.get("reason"), "rrn": body.get("rrn")}))
 
     def _verify(self, request: WebhookRequest) -> None:
-        if not self.webhook_secret:
-            # Fail closed: an unconfigured deployment must not accept unsigned callbacks.
-            raise WebhookRejected(503, "WEBHOOK_NOT_CONFIGURED",
-                                  "this deployment has no UPI webhook secret configured")
-        timestamp = request.headers.get("x-upi-timestamp")
-        signature = request.headers.get("x-upi-signature")
-        if not timestamp or not signature:
-            raise WebhookRejected(401, "MISSING_SIGNATURE",
-                                  "X-UPI-Timestamp and X-UPI-Signature are required")
-        try:
-            sent_at = int(timestamp)
-        except ValueError:
-            raise WebhookRejected(400, "INVALID_TIMESTAMP", "X-UPI-Timestamp must be unix seconds") from None
-        if abs(int(self.clock()) - sent_at) > self.replay_window:
-            raise WebhookRejected(400, "STALE_TIMESTAMP",
-                                  f"timestamp is more than {self.replay_window}s from now")
-        expected = hmac.new(self.webhook_secret.encode(), f"{timestamp}.".encode() + request.raw,
-                            hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expected, signature.strip().lower()):
-            raise WebhookRejected(401, "BAD_SIGNATURE", "signature does not match the body")
+        from app.infrastructure.webhook_signature import verify_signature
+        verify_signature(request.raw, request.headers, self.webhook_secret,
+                         timestamp_header="X-UPI-Timestamp", signature_header="X-UPI-Signature",
+                         label="UPI", now=self.clock, window=self.replay_window)
