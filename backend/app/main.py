@@ -11,6 +11,7 @@ from psycopg_pool import ConnectionPool
 
 from app.api import errors, gateway, payment_intents, terminals, transactions
 from app.application.authorization import AuthorizationService
+from app.application.methods import MethodRegistry
 from app.application.queries import TerminalQueryService
 from app.application.registration import RegistrationService
 from app.application.payment_intents import CheckoutCardProcessor, PaymentIntentService
@@ -18,6 +19,7 @@ from app.application.transactions import TransactionService
 from app.config import Settings
 from app.infrastructure.config_certification import ConfigCertificationRegistry
 from app.infrastructure.file_ca import FileCertificateAuthority
+from app.infrastructure.methods.card import CardMethodAdapter
 from app.infrastructure.card_service_client import HttpCardProcessor
 from app.infrastructure.postgres_api_keys import PostgresApiKeys
 from app.infrastructure.postgres_intents import PostgresIntentRepository
@@ -70,7 +72,10 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     )
     app.state.authorization = AuthorizationService(repo, certification)
     cards = cards or HttpCardProcessor(settings.card_service_url)
-    app.state.transactions = TransactionService(PostgresTransactionRepository(pool), app.state.authorization, cards)
+    # Step 8: the one place a rail is chosen. Adding UPI is one more line here and a module beside card.py.
+    methods = MethodRegistry([CardMethodAdapter(cards)])
+    app.state.methods = methods
+    app.state.transactions = TransactionService(PostgresTransactionRepository(pool), app.state.authorization, methods)
     app.state.intents = PaymentIntentService(PostgresIntentRepository(pool), cards)
     app.state.api_keys = PostgresApiKeys(pool)
     app.state.webhooks = webhooks
