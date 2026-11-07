@@ -82,28 +82,34 @@ def _relay(pool: ConnectionPool) -> None:
 
 
 def _upi_poll(pool: ConnectionPool) -> None:
-    """The polling fallback (Step 10A): resolve UPI payments a lost webhook left PENDING.
+    """The polling fallback (Steps 10A and 12b): resolve payments a lost webhook left PENDING.
 
-    Webhooks are primary; this exists because they get lost. It asks the PSP for the authoritative status and
-    hands the answer to `apply_method_result`, the same path the synchronous engine uses — the adapter never
-    writes state.
+    Webhooks are primary; this exists because they get lost. It asks the provider for the authoritative status
+    and hands the answer to `apply_method_result`, the same path the synchronous engine uses — the adapter never
+    writes state. Both asynchronous rails are swept, because a lost wallet callback is the same problem.
     """
     from app.infrastructure.methods.upi import UpiMethodAdapter
+    from app.infrastructure.methods.wallet import HttpWallet, WalletMethodAdapter
     from app.infrastructure.upi_client import HttpUpiPsp
 
-    adapter = UpiMethodAdapter(HttpUpiPsp(os.environ["UPI_PSP_URL"]))
+    sweeps = [
+        ("UPI", UpiMethodAdapter(HttpUpiPsp(os.environ["UPI_PSP_URL"]))),
+        ("WALLET", WalletMethodAdapter(HttpWallet(os.environ.get("WALLET_URL", "http://127.0.0.1:8090")))),
+    ]
     repo = PostgresTransactionRepository(pool)
     stale_after = int(os.environ.get("UPI_POLL_STALE_SECONDS", "300"))
 
     def once() -> int:
-        rows = repo.stale_pending("UPI", stale_after)
-        for transaction_id, terminal_id, reference in rows:
-            result = adapter.status(transaction_id, reference)
-            if result.status != "PENDING":  # still pending is a valid answer: leave it for the next pass
-                apply_method_result(repo, transaction_id, terminal_id, result)
-        return len(rows)
+        polled = 0
+        for method, adapter in sweeps:
+            for transaction_id, terminal_id, reference in repo.stale_pending(method, stale_after):
+                polled += 1
+                result = adapter.status(transaction_id, reference)
+                if result.status != "PENDING":  # still pending is a valid answer: leave it for the next pass
+                    apply_method_result(repo, transaction_id, terminal_id, result)
+        return polled
 
-    _forever(once, idle=5.0, done=lambda n: print(f"polled {n} pending UPI transaction(s)"))
+    _forever(once, idle=5.0, done=lambda n: print(f"polled {n} pending transaction(s)"))
 
 
 def _publish(store: PostgresAuditStore) -> None:
