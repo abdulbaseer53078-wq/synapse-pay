@@ -162,6 +162,49 @@ change to a frozen contract, and adding a redundant boolean would be a spec rele
 If a first-class sync/async flag is wanted anyway, it is an additive, non-breaking change — worth doing as its
 own version bump rather than smuggling it into this step.
 
+## Tasks 8.4–8.6
+
+**8.4 — wrap the card logic.** Done by 8.1 and 8.3: `CardMethodAdapter.send()` is the entire card rail, and the
+engine reaches it only through the registry.
+
+One deliberate deviation from the task's wording: the ISO 8583 message is **not** built inside this adapter.
+`card-service/` (Rust, depends on `iso8583` and `host-connector`) builds the 0100 and sends it; the Python
+adapter calls it over HTTP. That is Step 5A's decision, and the reason is PCI scope: pulling the host connector
+into Python would put clear card data in the API process, which is the one thing the architecture is arranged
+to avoid. The adapter is still the seam the task asks for — the engine cannot tell the difference, which is the
+point of the exercise.
+
+**`handle_webhook`.** It raises `UnsupportedOperation` rather than silently ignoring. "Ignore" and "reject" are
+not the same thing: an endpoint that accepts an unverified callback has to authenticate it first, and a card
+rail in v1 has no callback contract to authenticate against. When acquirer settlement advice is integrated, this
+becomes a real handler with a signature check.
+
+**`is_synchronous`.** Not in the frozen `CapabilityDescriptor`, for the reason given above — the contract
+describes timing through `transitions` and `settlement_timeline`. Adding it is a small additive spec change;
+it needs its own version bump, not a silent field.
+
+**8.5 — the factory.** `MethodRegistry` is the factory, deliberately a dict rather than the `if/elif` in the
+sketch: `if method == "CARD"` in the engine is exactly the rot Step 8 exists to prevent. `get_adapter(req.method)`
+is `registry.for_method(req.method)`, called at exactly one place (`transactions.py:170`).
+
+**8.6 — regression.** Three pins, all database-free:
+
+- `test_card_path_through_the_engine_is_unchanged` — the same body still produces the same acquirer request
+  (PURCHASE, card data untouched, DE 41/42 derived) and the same stored outcome.
+- `test_the_engine_routes_by_registry_not_by_hardcoding` — a registry without a CARD adapter makes a CARD
+  request fail, so a reintroduced `if method == "CARD"` breaks the build.
+- `test_the_engine_never_touches_a_processor_directly` — `TransactionService` has no `cards` parameter to reach
+  for.
+
+The audit path was not touched: the diff to `postgres_transactions.py` is one import, one type and two field
+names (`card_bin` → `bin`). Every `_audit(...)` call — `claim`, `mark_pending`, `finish` — is byte-identical, so
+the trail records the same three events in the same transaction as before.
+
+The full HTTP-level regression (`tests/test_transactions.py`, `tests/test_transactions_e2e.py`) still applies
+unchanged: `create_app` has always built the service, and since 8.1 the service takes its adapter from the
+registry. Those need Postgres and, for the e2e file, the card service and mock acquirer — run them before
+merging.
+
 ## Tests
 
 ```bash

@@ -316,7 +316,49 @@ def test_validate_without_a_model_passes_details_through():
     assert _BaseAdapter().validate(details) == details
 
 
-def test_idempotency_is_enforced_by_the_engine_not_the_adapter():
+# --- 8.6: the refactor changed no behaviour -------------------------------------------------------------
+
+def test_card_path_through_the_engine_is_unchanged():
+    """The regression pin: same request body → same acquirer message → same stored outcome.
+
+    Before Step 8 this ran inside TransactionService.create; after it, it runs one layer down in the adapter,
+    through the registry. Everything observable must be identical.
+    """
+    processor = _Processor(CardResult("CAPTURED", "rrn-9", "00", None, "NOT_NEEDED", "411111", "1111"))
+    repo = _Repo()
+    service = TransactionService(repo, _Auth(), MethodRegistry([CardMethodAdapter(processor)]))
+
+    response = service.create(TERMINAL, _body("CARD", VALID))
+
+    sent = processor.requests[0]
+    assert sent.kind == "PURCHASE"                       # AUTO capture still becomes a purchase
+    assert sent.encrypted_card_data == "ciphertext"      # card data handed through untouched
+    assert sent.card_expiry == "12/29"
+    assert (sent.acquirer_terminal_id, sent.acquirer_merchant_id) == acquirer_ids(TERMINAL, MERCHANT)
+    assert response["status"] == "CAPTURED"
+    finished = repo.finished[0]
+    assert finished["stored"] is True
+    assert finished["result"].method_reference == "rrn-9"
+    assert (finished["result"].bin, finished["result"].last4) == ("411111", "1111")
+
+
+def test_the_engine_routes_by_registry_not_by_hardcoding():
+    """If someone reintroduces `if method == "CARD"`, this fails: the registry has no CARD adapter."""
+    service = TransactionService(_Repo(), _Auth(), MethodRegistry([_Adapter("UPI")]))
+    with pytest.raises(MethodNotSupported):
+        service.create(TERMINAL, _body("CARD", VALID))
+
+
+def test_the_engine_never_touches_a_processor_directly():
+    """The engine is constructed with a registry and nothing else — there is no card processor to reach for."""
+    import inspect
+
+    from app.application.transactions import TransactionService as Engine
+
+    parameters = inspect.signature(Engine).parameters
+    assert "methods" in parameters
+    assert "cards" not in parameters
+
     """The requirement behind Task 8.3, at the layer that can actually guarantee it: the engine claims the key
     before the adapter is reached, so a replay never reaches the network twice."""
     class ReplayRepo(_Repo):
