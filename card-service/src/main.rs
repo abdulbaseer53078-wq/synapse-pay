@@ -4,6 +4,7 @@
 //! | --- | --- |
 //! | `CARD_SERVICE_ADDR` | listen address, default `127.0.0.1:7070` (loopback only: see `http`) |
 //! | `SIM_HSM_BDK_HEX` | simulated HSM base key, 32 or 64 hex chars (TEST KEY ONLY) |
+//! | `SIM_HSM_CHECKOUT_KEY` | PKCS#8 PEM file with the P-256 checkout key browsers encrypt to; generated (and lost on restart) if unset |
 //! | `HOST_ADDR`, `HOST_SERVER_NAME` | acquirer host `ip:port` and its TLS name |
 //! | `HOST_CA`, `HOST_CLIENT_CERT`, `HOST_CLIENT_KEY` | PEM files for mutual TLS to the host |
 //! | `HOST_DIALECT` | ISO 8583 dialect JSON (e.g. `iso8583/dialects/synthetic-host.json`) |
@@ -40,7 +41,18 @@ fn number<T: std::str::FromStr>(name: &str, default: T) -> T {
 
 #[tokio::main]
 async fn main() {
-    let hsm = SimHsm::from_hex(&var("SIM_HSM_BDK_HEX")).unwrap_or_else(|e| fail(&e));
+    let checkout = match env::var("SIM_HSM_CHECKOUT_KEY") {
+        Ok(path) => {
+            use p256::pkcs8::DecodePrivateKey;
+            let pem = std::fs::read_to_string(&path).unwrap_or_else(|e| fail(&format!("SIM_HSM_CHECKOUT_KEY: {e}")));
+            p256::SecretKey::from_pkcs8_pem(&pem).unwrap_or_else(|_| fail("SIM_HSM_CHECKOUT_KEY is not a P-256 PKCS#8 PEM"))
+        }
+        Err(_) => {
+            eprintln!("card-service: SIM_HSM_CHECKOUT_KEY not set; generated a checkout key that lasts until restart");
+            p256::SecretKey::random(&mut rand_core::OsRng)
+        }
+    };
+    let hsm = SimHsm::from_hex(&var("SIM_HSM_BDK_HEX")).unwrap_or_else(|e| fail(&e)).with_checkout_key(checkout);
     let dialect = std::fs::read_to_string(var("HOST_DIALECT")).unwrap_or_else(|e| fail(&format!("HOST_DIALECT: {e}")));
     let dictionary = Dictionary::from_json(&dialect).unwrap_or_else(|e| fail(&format!("HOST_DIALECT: {e}")));
     let audit_file = std::fs::OpenOptions::new().create(true).append(true).open(var("AUDIT_LOG_PATH"))
