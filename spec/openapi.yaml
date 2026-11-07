@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.2.0
+  version: 1.3.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
-    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope.
+    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions.
 servers:
   - url: /api
 # Merchant backends use OAuth2; terminals use mTLS. Either satisfies a request.
@@ -117,6 +117,126 @@ paths:
         5XX: { $ref: '#/components/responses/Error' }
   # Query and management. Merchants see only their own terminals (others' return 404); registry:admin may
   # act on any merchant's, and every such admin access is recorded in the audit log.
+  # Payment intents (1.3.0): the merchant's server fixes the amount with its secret key; the customer's browser
+  # or app pays it with the intent's client_secret, entering the card in Synapse's own card form.
+  /v1/payment_intents:
+    post:
+      operationId: createPaymentIntent
+      summary: Create a payment intent (merchant server)
+      description: >-
+        Same idempotency_key and body returns the same intent (200); a different body is a 409. Give the
+        client_secret to the customer's page or app. With terminal_id, the intent is paid on that terminal.
+      security:
+        - SecretKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePaymentIntentRequest' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentIntent' }
+        '200':
+          description: Already created with this idempotency_key and body.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentIntent' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/payment_intents/{payment_intent_id}:
+    get:
+      operationId: getPaymentIntent
+      summary: Retrieve a payment intent
+      description: >-
+        With the secret key, the whole intent. With ?client_secret (no other credentials), the view a customer's
+        page may see: no client_secret, metadata, description or webhook_url.
+      security:
+        - SecretKey: []
+        - {}
+      parameters:
+        - $ref: '#/components/parameters/PaymentIntentId'
+        - name: client_secret
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: The intent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentIntent' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/payment_intents/{payment_intent_id}/cancel:
+    post:
+      operationId: cancelPaymentIntent
+      summary: Cancel a payment intent that's still waiting for the customer
+      security:
+        - SecretKey: []
+      parameters:
+        - $ref: '#/components/parameters/PaymentIntentId'
+      responses:
+        '200':
+          description: Canceled.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentIntent' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/payment_intents/{payment_intent_id}/confirm:
+    post:
+      operationId: confirmPaymentIntent
+      summary: Pay a payment intent with a card (customer's card form, client_secret)
+      description: >-
+        Called by Synapse's card frame or mobile SDK, never by merchant code. Runs 3-D Secure; when the issuer
+        asks the cardholder, the intent comes back REQUIRES_ACTION with next_action. Safe to repeat: an intent
+        that isn't REQUIRES_PAYMENT_METHOD is returned as it is, never charged again. A declined card returns the
+        intent to REQUIRES_PAYMENT_METHOD with last_payment_error, so the customer can try another card.
+      security: [{}]
+      parameters:
+        - $ref: '#/components/parameters/PaymentIntentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfirmPaymentIntentRequest' }
+      responses:
+        '200':
+          description: The intent after this attempt.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentIntent' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  /v1/checkout/key:
+    get:
+      operationId: getCheckoutKey
+      summary: The HSM's public checkout key (JWK, EC P-256) that card forms encrypt card data to
+      security: [{}]
+      responses:
+        '200':
+          description: The key.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kty, crv, x, y]
+                properties:
+                  kty: { const: EC }
+                  crv: { const: P-256 }
+                  x: { type: string }
+                  y: { type: string }
+        4XX: { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
   /v1/terminals:
     get:
       operationId: listTerminals
@@ -263,6 +383,34 @@ paths:
       parameters: [{ $ref: '#/components/parameters/TerminalId' }]
       requestBody: { $ref: '#/components/requestBodies/StatusChange' }
       responses: *statusChangeResponses
+  /v1/terminals/{terminal_id}/checkout:
+    get:
+      operationId: getTerminalCheckout
+      summary: The next payment intent this terminal should take (long poll)
+      description: >-
+        Waits up to `wait` seconds for an intent created for this terminal. The terminal then pays it with
+        POST /v1/transactions carrying payment_intent_id, the same amount and currency.
+      security:
+        - MutualTLS: []
+      parameters:
+        - name: terminal_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: wait
+          in: query
+          required: false
+          schema: { type: number, minimum: 0, maximum: 10, default: 0 }
+      responses:
+        '200':
+          description: A payment to take.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckoutJob' }
+        '204':
+          description: Nothing to take right now.
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
   /v1/terminals/{terminal_id}/heartbeat:
     post:
       operationId: terminalHeartbeat
@@ -473,6 +621,12 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    PaymentIntentId:
+      name: payment_intent_id
+      in: path
+      required: true
+      description: pi_ followed by 32 hex digits; anything else is a 404.
+      schema: { type: string }
   securitySchemes:
     # Merchant SDK / merchant backend → cloud API.
     OAuth2ClientCredentials:
@@ -487,6 +641,11 @@ components:
             registry:write: Register and update terminals
             registry:admin: Platform-admin terminal operations (any merchant's terminals; reinstate)
             registry:authorize: Routing engine's per-transaction terminal authorization check
+    # Merchant server → cloud with a secret API key (1.3.0): Authorization: Bearer sk_test_...
+    SecretKey:
+      type: http
+      scheme: bearer
+      bearerFormat: sk_test_... / sk_live_...
     # Terminal → cloud (T2C).
     MutualTLS:
       type: mutualTLS
@@ -843,6 +1002,84 @@ components:
           - { from: PENDING, to: FAILED }
           - { from: AUTHORIZED, to: SETTLED }
   schemas:
+    CreatePaymentIntentRequest:
+      type: object
+      additionalProperties: false
+      required: [idempotency_key, amount, currency]
+      properties:
+        idempotency_key: { type: string, format: uuid, description: The server SDKs generate one per create. }
+        amount: { type: integer, format: int64, minimum: 100, description: 'Smallest currency unit; at least ₹1.00.' }
+        currency: { type: string, enum: [INR] }
+        capture_mode: { type: string, enum: [AUTO, MANUAL], default: AUTO }
+        description: { type: string, maxLength: 512 }
+        metadata: { type: object, additionalProperties: { type: string } }
+        webhook_url: { type: string, format: uri, pattern: '^https://' }
+        terminal_id: { type: string, format: uuid, description: Take the payment on this ACTIVE terminal of the merchant. }
+    ConfirmPaymentIntentRequest:
+      type: object
+      additionalProperties: false
+      required: [client_secret, card]
+      properties:
+        client_secret: { type: string }
+        payment_method: { type: string, enum: [CARD], default: CARD }
+        card:
+          type: object
+          additionalProperties: false
+          required: [encrypted_card_data, card_expiry, card_network]
+          properties:
+            encrypted_card_data:
+              type: string
+              description: The PAN in an sp2 envelope (ECIES to the checkout key; see card-service/src/hsm.rs).
+            encrypted_cvv: { type: string, description: 'The security code in an sp2 envelope. Checked, never stored.' }
+            card_expiry: { type: string, pattern: '^(0[1-9]|1[0-2])/[0-9]{2}$' }
+            card_network: { type: string, enum: [VISA, MASTERCARD, RUPAY, AMEX] }
+            cardholder_name: { type: string, description: PII; not stored. }
+    PaymentIntent:
+      type: object
+      required: [id, status, amount, currency, capture_mode, created_at, updated_at, expires_at]
+      properties:
+        id: { type: string, description: 'pi_ followed by 32 hex digits.' }
+        status:
+          type: string
+          enum: [REQUIRES_PAYMENT_METHOD, REQUIRES_ACTION, PROCESSING, SUCCEEDED, CANCELED]
+          description: >-
+            REQUIRES_PAYMENT_METHOD waiting for a card (again, after a decline: see last_payment_error);
+            REQUIRES_ACTION waiting for the cardholder's 3-D Secure step (next_action); PROCESSING the bank's answer
+            is late (resolved by reconciliation; never charge again); SUCCEEDED paid; CANCELED.
+        amount: { type: integer, format: int64 }
+        currency: { type: string }
+        capture_mode: { type: string, enum: [AUTO, MANUAL] }
+        client_secret: { type: string, description: 'pi_..._secret_...; only to the merchant (secret key).' }
+        description: { type: string }
+        metadata: { type: object, additionalProperties: { type: string } }
+        webhook_url: { type: string }
+        terminal_id: { type: string, format: uuid }
+        transaction_id: { type: string, description: The latest payment attempt. }
+        last_payment_error: { $ref: '#/components/schemas/Error' }
+        card:
+          type: object
+          properties:
+            bin: { type: string }
+            last4: { type: string }
+        next_action:
+          type: object
+          required: [type, url]
+          properties:
+            type: { const: THREE_DS_CHALLENGE }
+            url: { type: string, description: Relative to the API; the issuer's challenge page. }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    CheckoutJob:
+      type: object
+      required: [payment_intent_id, amount, currency, capture_mode, expires_at]
+      properties:
+        payment_intent_id: { type: string }
+        amount: { type: integer, format: int64 }
+        currency: { type: string }
+        capture_mode: { type: string, enum: [AUTO, MANUAL] }
+        description: { type: string }
+        expires_at: { type: string, format: date-time }
     TransactionRequest:
       type: object
       additionalProperties: false
@@ -907,6 +1144,12 @@ components:
           format: uri
           pattern: '^https://'
           description: Where to send the final status notification. HTTPS only.
+        payment_intent_id:
+          type: string
+          pattern: '^pi_[0-9a-f]{32}$'
+          description: >-
+            Since 1.3.0. Terminals only: this payment completes a payment intent from terminal checkout; amount
+            and currency must match it.
       # The discriminator (payment_method) sits beside method_details, not inside it,
       # so OpenAPI's `discriminator` keyword can't be used; JSON Schema if/then does the job.
       allOf:
@@ -959,6 +1202,9 @@ components:
         error:
           $ref: '#/components/schemas/Error'
           description: Only present if status is FAILED.
+        payment_intent_id:
+          type: string
+          description: Since 1.3.0. The payment intent this transaction pays, if any.
         metadata: { $ref: '#/components/schemas/TransactionRequest/properties/metadata' }
       if: { properties: { status: { const: FAILED } } }
       then: { required: [error] }
@@ -1017,6 +1263,8 @@ components:
             - TERMINAL_NOT_FOUND
             - MERCHANT_NOT_FOUND
             - INTERNAL_ERROR
+            - AUTHENTICATION_FAILED
+            - PAYMENT_INTENT_NOT_FOUND
           description: >-
             Machine-readable code. ISSUER_DECLINED (since 1.1.0) covers issuer declines without a more
             specific code; error_category says whether it's soft or hard. Values are added over time, so
