@@ -162,6 +162,8 @@ class CapabilityDescriptor:
     is_synchronous: bool  # True: initiate() returns the final outcome. False: PENDING, settled by webhook.
     dispute_rules: DisputeRules
     transitions: tuple[Transition, ...]
+    # Methods accepted without connectivity publish what the SDK must enforce locally (contract 1.7.0).
+    offline_limits: dict | None = None
 
     def supports(self, capability: str) -> bool:
         """`supports("partial_refund")` and `supports("supports_partial_refund")` both work."""
@@ -185,7 +187,7 @@ class CapabilityDescriptor:
             "is_synchronous": self.is_synchronous,
             "dispute_rules": self.dispute_rules.to_dict(),
             "transitions": [t.to_dict() for t in self.transitions],
-        }
+        } | ({"offline_limits": self.offline_limits} if self.offline_limits else {})
 
 
 class PaymentMethodAdapter(Protocol):

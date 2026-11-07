@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.8.0
+  version: 1.8.1
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
     goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions.
@@ -644,7 +644,7 @@ paths:
                     type: object
                     additionalProperties: false
                     required: [offline_reference, local_timestamp, idempotency_key, amount, currency, payment_method,
-                               terminal_id, merchant_id, method_details, signature]
+                               terminal_id, merchant_id, underlying_rail, method_details, signature]
                     properties:
                       offline_reference:
                         type: string
@@ -663,6 +663,13 @@ paths:
                       payment_method: { $ref: '#/components/schemas/TransactionRequest/properties/payment_method' }
                       terminal_id: { $ref: '#/components/schemas/TransactionRequest/properties/terminal_id' }
                       merchant_id: { $ref: '#/components/schemas/TransactionRequest/properties/merchant_id' }
+                      underlying_rail:
+                        type: string
+                        enum: [CARD, UPI, WALLET, QR]
+                        description: >-
+                          The rail this queued sale actually belongs to. Named explicitly rather than inferred
+                          from method_details: inference is how per-method branching creeps back into the engine,
+                          and a misread shape would dispatch a card sale to UPI.
                       method_details: { $ref: '#/components/schemas/TransactionRequest/properties/method_details' }
                       signature:
                         type: string
