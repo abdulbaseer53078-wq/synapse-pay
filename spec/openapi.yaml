@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.4.0
+  version: 1.5.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
     goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions.
@@ -980,6 +980,7 @@ components:
         supports_partial_capture: true
         settlement_timeline: T+1
         auth_type: issuer_authorization
+        is_synchronous: true
         dispute_rules: { framework: CARD_SCHEME, dispute_window_days: 120, resolution_timeline_days: 45 }
         transitions:
           - { from: INITIATED, to: PENDING }
@@ -1008,6 +1009,7 @@ components:
         supports_partial_capture: false
         settlement_timeline: instant
         auth_type: vpa_collect
+        is_synchronous: false
         dispute_rules: { framework: NPCI_UPI, dispute_window_days: 30, resolution_timeline_days: 30 }
         transitions:
           - { from: INITIATED, to: PENDING }
@@ -1028,6 +1030,7 @@ components:
         supports_partial_capture: false
         settlement_timeline: T+0
         auth_type: otp
+        is_synchronous: false
         dispute_rules: { framework: NONE, dispute_window_days: 0 }
         transitions:
           - { from: INITIATED, to: PENDING }
@@ -1051,6 +1054,7 @@ components:
         supports_partial_capture: false
         settlement_timeline: unknown
         auth_type: unknown
+        is_synchronous: false
         dispute_rules: { framework: NONE, dispute_window_days: 0 }
         transitions:
           - { from: INITIATED, to: PENDING }
@@ -1067,6 +1071,7 @@ components:
         supports_partial_capture: false
         settlement_timeline: T+1_on_sync
         auth_type: local_fraud_screening
+        is_synchronous: false
         dispute_rules: { framework: NONE, dispute_window_days: 0 }
         transitions:
           - { from: INITIATED, to: PENDING }
@@ -1429,6 +1434,7 @@ components:
         - auth_type
         - dispute_rules
         - transitions
+        - is_synchronous
       properties:
         payment_method: { $ref: '#/components/schemas/TransactionRequest/properties/payment_method' }
         supports_chargeback: { type: boolean }
@@ -1443,6 +1449,14 @@ components:
         auth_type:
           type: string
           examples: [vpa_collect]
+        is_synchronous:
+          type: boolean
+          description: >-
+            True when a successful initiate() returns the network's final outcome in the same response, so the
+            SDK can show a result immediately (card present: the issuer authorizes in-line). False when the
+            rail answers PENDING and settles through a webhook (UPI collect, wallet OTP, QR, offline sync), so
+            the SDK must wait for the webhook or poll. The engine uses it to know that a PENDING result is the
+            method working as designed, not a timeout.
         dispute_rules:
           type: object
           additionalProperties: false

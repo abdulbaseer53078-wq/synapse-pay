@@ -123,6 +123,7 @@ class CapabilityDescriptor:
     supports_partial_capture: bool
     settlement_timeline: str
     auth_type: str
+    is_synchronous: bool  # True: initiate() returns the final outcome. False: PENDING, settled by webhook.
     dispute_rules: DisputeRules
     transitions: tuple[Transition, ...]
 
@@ -145,6 +146,7 @@ class CapabilityDescriptor:
             "supports_partial_capture": self.supports_partial_capture,
             "settlement_timeline": self.settlement_timeline,
             "auth_type": self.auth_type,
+            "is_synchronous": self.is_synchronous,
             "dispute_rules": self.dispute_rules.to_dict(),
             "transitions": [t.to_dict() for t in self.transitions],
         }

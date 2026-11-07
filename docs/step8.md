@@ -137,10 +137,11 @@ but the backend never implemented:
 GET /api/v1/capabilities/{payment_method}     scope transactions:read, or a terminal over mTLS
 ```
 
-The values are the frozen `CapabilityDescriptor` (spec 1.3.0), and `CardMethodAdapter` returns exactly the
-`CardCapabilities` example the contract is tested against — chargebacks yes, partial refunds yes, recurring
-yes, offline yes, settlement T+1, dispute window 120 days, twelve transitions. `test_card_capabilities_match_
-the_spec_example` pins the whole thing, and the payload was validated against the OpenAPI schema directly.
+The values are the `CapabilityDescriptor` (spec 1.5.0; the descriptor itself has been stable since 1.0.0 and
+`is_synchronous` was added additively), and `CardMethodAdapter` returns exactly the `CardCapabilities` example
+the contract is tested against — chargebacks yes, partial refunds yes, recurring yes, offline yes, synchronous
+yes, settlement T+1, dispute window 120 days, twelve transitions. `test_card_capabilities_match_the_spec_example`
+pins the whole thing, and the payload was validated against the OpenAPI schema directly.
 
 ### Refusing work before the adapter is called
 
@@ -155,12 +156,16 @@ expected to start with this line, which is why the guard lives on the registry r
 
 ### A note on the brief's sample JSON
 
-The task's sample said `method` and included `is_synchronous`. The frozen contract says `payment_method` and
-has no `is_synchronous`; asynchronous rails are already described by `transitions` (`PENDING → SETTLED`) and
-`settlement_timeline`, which is what the SDK and dispute tooling branch on. Renaming would be a breaking
-change to a frozen contract, and adding a redundant boolean would be a spec release for no new information.
-If a first-class sync/async flag is wanted anyway, it is an additive, non-breaking change — worth doing as its
-own version bump rather than smuggling it into this step.
+The task's sample said `method`; the frozen contract says `payment_method`, and that stands — renaming a field
+clients already validate against is a breaking change for no gain.
+
+`is_synchronous` was a different case: it carries information the contract could only imply. It is now a
+**required boolean in 1.5.0**. Only CARD is `true`; UPI, WALLET, QR and OFFLINE all answer `PENDING` and settle
+later, so they are `false`. The SDK reads it to decide whether to show a result or "check your UPI app", and
+the engine reads it to know that a `PENDING` result is the rail working as designed rather than a timeout.
+
+Making it required rather than optional is deliberate: an optional flag invites a rail to forget it, and the
+consumer of a capability descriptor cannot tell "absent" from "unknown".
 
 ## Tasks 8.4–8.6
 
