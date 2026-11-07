@@ -40,6 +40,10 @@ class BaseMethodAdapter(ABC):
     method: str = ""
     CAPABILITIES: CapabilityDescriptor
     DETAILS: type[BaseModel] | None = None  # pydantic shape of method_details; None means "accept as-is"
+    # True when this adapter can send the same payment to a chosen host (CARD forwards `host_hint` to the Rust
+    # fleet). A rail with one bound endpoint must stay False: cascading would repeat the request on the same
+    # provider, which for a collect is a second collect, not a failover.
+    SUPPORTS_HOST_ROUTING: bool = False
     # processor exception → shared adapter exception. Anything unmapped becomes AdapterUnavailable.
     ERROR_MAP: Mapping[type[Exception], Callable[[Exception], Exception]] = {}
 

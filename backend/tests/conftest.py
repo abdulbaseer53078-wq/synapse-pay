@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from app.config import DEFAULT_APPROVED_MODELS, Settings
 from app.main import create_app
 from terminal_sim import SimulatedTerminal, register_body, url
-from e2e_stack import acquirer, card_service_binary  # noqa: F401  (fixtures for end-to-end tests)
+from e2e_stack import acquirer, card_service_binary, multi_acquirer  # noqa: F401  (fixtures for end-to-end tests)
 
 MIGRATIONS = Path(__file__).parents[2] / "db" / "migrations"
 ADMIN_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/postgres")

@@ -25,7 +25,7 @@ class HttpCardProcessor:
             "currency": request.currency, "acquirer_terminal_id": request.acquirer_terminal_id,
             "acquirer_merchant_id": request.acquirer_merchant_id,
             "encrypted_card_data": request.encrypted_card_data, "card_expiry": request.card_expiry,
-            "pin_block": request.pin_block,
+            "pin_block": request.pin_block, "host_hint": list(request.host_hint),
         }
         try:
             response = self.client.post("/card/transactions", json=body)
@@ -43,7 +43,8 @@ class HttpCardProcessor:
         data = response.json()
         return CardResult(status=data["status"], method_reference=data.get("method_reference"),
                           auth_code=data.get("auth_code"), error=data.get("error"), reversal=data["reversal"],
-                          card_bin=data["card_bin"], card_last4=data["card_last4"])
+                          card_bin=data["card_bin"], card_last4=data["card_last4"],
+                          host_used=data.get("host_used"))
 
     def _post(self, path: str, body: dict) -> dict:
         try:

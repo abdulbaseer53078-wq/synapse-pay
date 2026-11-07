@@ -17,6 +17,7 @@ from app.application.methods import MethodRegistry
 from app.application.queries import TerminalQueryService
 from app.application.registration import RegistrationService
 from app.application.payment_intents import CheckoutCardProcessor, PaymentIntentService
+from app.application.routing import InMemoryRules, RoutingEngine, RoutingRule
 from app.application.transaction_sync import OfflineSyncService
 from app.application.transactions import TransactionService
 from app.application.upi_webhooks import WebhookHandler
@@ -84,6 +85,12 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
         if settings.webhook_interval > 0:
             worker = threading.Thread(target=deliver_webhooks, name="webhooks", daemon=True)
             worker.start()
+        # One poll before serving traffic. The router reads the cache and nothing else, so an empty cache would
+        # fail every payment for the first `health_poll_seconds`; a single refresh closes that cold-start window.
+        try:
+            health.refresh()
+        except Exception as exc:  # fail closed: the snapshot stays empty, and routing says so
+            print(f"host health poll failed: {type(exc).__name__}")
         # The router reads health.snapshot(); the poller is the only thing that talks to card-service.
         health_worker = threading.Thread(target=poll_health, name="host-health", daemon=True)
         health_worker.start()
@@ -115,7 +122,14 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.state.methods = methods
     app.state.health = health
     transaction_repo = PostgresTransactionRepository(pool)
-    app.state.transactions = TransactionService(transaction_repo, app.state.authorization, methods)
+    # Step 15: routing is active only when an operator configured a preference. No rules means the single-attempt
+    # path, not "no healthy host": an unconfigured service keeps behaving exactly as it did before.
+    routing = None
+    if settings.routing_rules:
+        rules = [RoutingRule(method, tuple(hosts)) for method, hosts in settings.routing_rules.items()]
+        routing = RoutingEngine(InMemoryRules({"*": rules}), health)
+    app.state.transactions = TransactionService(transaction_repo, app.state.authorization, methods,
+                                                routing=routing)
     # Step 13: offline batch upload. Same engine, same rails; the signature and the age/limit checks are the
     # only things that differ from an online payment.
     app.state.offline_sync = OfflineSyncService(methods, repo, app.state.transactions, ca.verify_signature)

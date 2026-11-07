@@ -98,6 +98,9 @@ class MethodRequest:
     details: dict
     customer_ref: str | None = None
     metadata: dict = field(default_factory=dict)
+    # The hosts this attempt may use, in preference order. The engine sets one host per cascade attempt; an
+    # adapter that cannot choose a host (UPI, wallet) ignores it, and the card adapter forwards it to Rust.
+    host_hint: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,9 @@ class MethodResult:
     last4: str | None = None
     # Present when the customer must finish elsewhere (wallet login, 3-D Secure): {"type", "url"}.
     next_action: dict | None = None
+    # Which host actually answered, when the adapter was given a choice. It can differ from the host asked
+    # for if the connector failed over internally, so the engine records this, not its own assumption.
+    host_used: str | None = None
 
     @property
     def retryable(self) -> bool:

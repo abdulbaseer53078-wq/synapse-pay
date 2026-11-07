@@ -72,6 +72,8 @@ class CardMethodAdapter(BaseMethodAdapter):
     method = "CARD"
     CAPABILITIES = CARD_CAPABILITIES
     DETAILS = CardDetails
+    # The card service owns one pool per acquirer, so a hint sent here actually picks the host on the wire.
+    SUPPORTS_HOST_ROUTING = True
     # The card service's vocabulary, translated once. Everything else falls through to AdapterUnavailable.
     ERROR_MAP = {
         CardServiceUnavailable: lambda exc: AdapterUnavailable(exc.message),
@@ -91,8 +93,9 @@ class CardMethodAdapter(BaseMethodAdapter):
             acquirer_terminal_id=terminal, acquirer_merchant_id=merchant,
             encrypted_card_data=request.details["encrypted_card_data"],
             card_expiry=request.details["card_expiry"],
-            pin_block=request.details.get("pin_block"))
+            pin_block=request.details.get("pin_block"),
+            host_hint=list(request.host_hint))
         result = self.processor.process(card)
         return MethodResult(status=result.status, method_reference=result.method_reference,
                             auth_code=result.auth_code, error=result.error, reversal=result.reversal,
-                            bin=result.card_bin, last4=result.card_last4)
+                            bin=result.card_bin, last4=result.card_last4, host_used=result.host_used)

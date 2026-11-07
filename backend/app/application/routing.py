@@ -52,13 +52,17 @@ class RuleStore(Protocol):
 
 
 class InMemoryRules:
-    """The shape the database table will have: merchant → rules. Step 15 reads it through the same protocol."""
+    """The shape the database table will have: merchant → rules. Step 15 reads it through the same protocol.
+
+    `"*"` is the fallback: rules that apply to every merchant without one of their own. It is how an operator
+    configures a fleet-wide preference before per-merchant rows exist.
+    """
 
     def __init__(self, rules: dict[str, list[RoutingRule]] | None = None):
         self._rules = rules or {}
 
     def rules_for(self, merchant_id: str) -> list[RoutingRule]:
-        return self._rules.get(merchant_id, [])
+        return self._rules.get(merchant_id) or self._rules.get("*", [])
 
 
 class RoutingEngine:
@@ -69,11 +73,12 @@ class RoutingEngine:
     def route(self, merchant_id: str, method: str, amount: int) -> RoutingDecision:
         available = {h.host_id: h for h in self.health.snapshot()}
         for rule in self._ordered(merchant_id, method, amount):
-            chosen = self._first_healthy(rule, available)
-            if chosen is not None:
+            ordered = self._healthy_order(rule, available)
+            if ordered:
+                chosen = ordered[0]
                 return RoutingDecision(chosen.host_id, chosen.rail_type,
                                        f"{rule.describe(amount)}; {chosen.host_id} is {chosen.status}",
-                                       rule.preferred_hosts)
+                                       tuple(h.host_id for h in ordered))
         raise NoHealthyHostError(f"no healthy host for {method} at this merchant")
 
     def _ordered(self, merchant_id: str, method: str, amount: int) -> list[RoutingRule]:
@@ -83,13 +88,23 @@ class RoutingEngine:
         return matching
 
     @staticmethod
-    def _first_healthy(rule: RoutingRule, available: dict):
-        """DOWN is skipped. DEGRADED is used only when nothing better in this rule is left."""
+    def _healthy_order(rule: RoutingRule, available: dict) -> list:
+        """The rule's usable hosts, the one to try first at the front.
+
+        DOWN is skipped. The router prefers an UP host, but keeps every usable host in the rule's order: the
+        cascade needs the shortlist, and a DEGRADED backup is better than no backup at all.
+        """
         candidates = [available[h] for h in rule.preferred_hosts if h in available and available[h].usable]
         if not candidates:
-            return None
+            return []
         up = [h for h in candidates if h.status == HealthStatus.UP]
-        return (up or candidates)[0]
+        first = (up or candidates)[0]
+        ordered, seen = [], set()
+        for host in [first, *candidates]:
+            if host.host_id not in seen:
+                seen.add(host.host_id)
+                ordered.append(host)
+        return ordered
 
 
 def cascade(hosts: Iterable[str], attempt: Callable[[str], MethodResult],
@@ -111,8 +126,11 @@ def cascade(hosts: Iterable[str], attempt: Callable[[str], MethodResult],
         # only way the payment still happens.
         retryable = bool(result.error and result.error.get("retryable")) or (
             result.status == "PENDING" and result.next_action is None)
-        trail.append({"host": host, "status": result.status, "retryable": retryable,
-                      "error": (result.error or {}).get("error_code")})
+        # `asked` and `host` start the same. They diverge only when the adapter reports a different `host_used`,
+        # which is the point of recording both: the audit trail must say what we asked for *and* what answered.
+        trail.append({"asked": host, "host": host, "status": result.status, "retryable": retryable,
+                      "error": (result.error or {}).get("error_code"),
+                      "error_category": (result.error or {}).get("error_category")})
         if not retryable:
             return result, trail
     return last or MethodResult(status="FAILED"), trail

@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use host_connector::pool::IsoHostPool;
 use host_connector::{BoxFuture, HostConnector, HostError, HostResponse, HostState, HostStatus, RequestContext,
@@ -50,22 +51,45 @@ impl HostConnector for Fleet {
                 ctx.host_hint.clone()
             };
 
-            for host_id in hint {
-                let Some(pool) = self.pools.get(&host_id) else { continue };
-                if pool.connections_up() == 0 {
-                    continue; // every socket to this host is down; the link layer is already reconnecting
+            // Only hosts that exist and have a live socket: a skipped host must not consume a timeout slice.
+            // Ordered as the caller asked, so the routing engine's preference order survives.
+            let candidates: Vec<(&String, &Arc<IsoHostPool>)> = hint.iter()
+                .filter_map(|host_id| self.pools.get(host_id).map(|pool| (host_id, pool)))
+                .filter(|(_, pool)| pool.connections_up() > 0)
+                .collect();
+            if candidates.is_empty() {
+                return Err(HostError::Unavailable("no host in the hint is up".into()));
+            }
+
+            // Split the caller's deadline across the hosts that are left. Without this, the first host can
+            // spend the whole budget and the backup never gets a chance to answer. The caller still gets one
+            // overall deadline; it is the fleet's job to divide it, not to multiply it by the number of hosts.
+            let total = candidates.len();
+            let mut unknown: Option<HostError> = None;
+            for (index, (host_id, pool)) in candidates.into_iter().enumerate() {
+                let remaining = ctx.deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
                 }
-                match pool.send_with_stan(ctx, txn, stan.clone()).await {
+                let mut attempt = ctx.clone();
+                attempt.deadline = Instant::now() + remaining / (total - index) as u32;
+                match pool.send_with_stan(&attempt, txn, stan.clone()).await {
                     Ok(mut response) => {
                         // The truth for the audit trail: not the host we asked for, the host that answered.
-                        response.host_used = host_id;
+                        response.host_used = host_id.clone();
                         return Ok(response);
                     }
-                    Err(error) if error.outcome_unknown() => continue, // may have been approved: try the next
-                    Err(error) => return Err(error), // a clean "not delivered" / hard stop
+                    Err(error) if error.outcome_unknown() => {
+                        // The host may have acted. Remember it: a later "unavailable" must not turn an unknown
+                        // outcome into a clean failure the caller would happily retry.
+                        unknown = Some(error);
+                    }
+                    Err(error) => return Err(unknown.unwrap_or(error)),
                 }
             }
-            Err(HostError::Unavailable("no host in the hint accepted the transaction".into()))
+            Err(unknown.unwrap_or_else(|| {
+                HostError::Unavailable("no host in the hint accepted the transaction before the deadline".into())
+            }))
         })
     }
 
