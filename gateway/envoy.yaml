@@ -1,0 +1,74 @@
+# Terminal-facing gateway (Task 2.8): terminates mTLS and enforces registry status before the backend.
+#   1. TLS: client cert required, chained to the platform CA, checked against the CA's CRL.
+#      Revoked or foreign-CA certs fail the handshake; no HTTP request is ever made.
+#   2. ext_authz: the backend's /internal/gateway/authz reads the terminal_id from the cert's URI SAN
+#      (forwarded in X-Forwarded-Client-Cert) and returns 403 unless the terminal is ACTIVE.
+#   3. Heartbeats skip step 2, so SUSPENDED terminals keep reporting (they still need a valid cert).
+# Files in /etc/synapse: ca.pem, crl.pem (both from the CA), server.pem, server-key.pem.
+# shortcut: Envoy reads crl.pem at startup; restart it after a revocation, or serve the validation
+# context over SDS so CRL updates load live, before production.
+static_resources:
+  listeners:
+    - name: terminals_mtls
+      address: { socket_address: { address: 0.0.0.0, port_value: 8443 } }
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_certificates:
+                  - certificate_chain: { filename: /etc/synapse/server.pem }
+                    private_key: { filename: /etc/synapse/server-key.pem }
+                validation_context:
+                  trusted_ca: { filename: /etc/synapse/ca.pem }
+                  crl: { filename: /etc/synapse/crl.pem }
+                  only_verify_leaf_cert_crl: true
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: terminals
+                # Drop any client-supplied header, then set it from the verified certificate.
+                forward_client_cert_details: SANITIZE_SET
+                set_current_client_cert_details: { uri: true }
+                route_config:
+                  virtual_hosts:
+                    - name: terminals
+                      domains: ["*"]
+                      routes:
+                        - match: { safe_regex: { regex: "/api/v1/terminals/[^/]+/heartbeat" } }
+                          route: { cluster: backend }
+                          typed_per_filter_config:
+                            envoy.filters.http.ext_authz:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthzPerRoute
+                              disabled: true
+                        - match: { prefix: "/api/" }
+                          route: { cluster: backend }
+                        # Nothing else (notably /internal/*) is reachable through the gateway.
+                http_filters:
+                  - name: envoy.filters.http.ext_authz
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                      transport_api_version: V3
+                      failure_mode_allow: false  # registry unreachable → deny
+                      http_service:
+                        server_uri: { uri: "http://backend", cluster: backend, timeout: 0.5s }
+                        path_prefix: /internal/gateway/authz
+                        authorization_request:
+                          allowed_headers: { patterns: [{ exact: x-forwarded-client-cert }] }
+                        authorization_response:
+                          allowed_upstream_headers: { patterns: [{ exact: x-terminal-id }] }
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: backend
+      type: STRICT_DNS
+      connect_timeout: 1s
+      load_assignment:
+        cluster_name: backend
+        endpoints:
+          - lb_endpoints:
+              - endpoint: { address: { socket_address: { address: host.docker.internal, port_value: 8000 } } }

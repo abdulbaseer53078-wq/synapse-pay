@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.0.0
+  version: 1.1.0
   description: >-
-    Frozen at v1.0.0. Any change to this contract goes through a versioned
-    breaking-change process (e.g. a /v2 endpoint).
+    v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
+    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API.
 servers:
   - url: /api
 # Merchant backends use OAuth2; terminals use mTLS. Either satisfies a request.
@@ -115,7 +115,364 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         5XX: { $ref: '#/components/responses/Error' }
+  # Query and management. Merchants see only their own terminals (others' return 404); registry:admin may
+  # act on any merchant's, and every such admin access is recorded in the audit log.
+  /v1/terminals:
+    get:
+      operationId: listTerminals
+      summary: List the merchant's terminals (keyset-paginated, ordered by terminal_id)
+      security: [{ OAuth2ClientCredentials: [registry:read] }, { OAuth2ClientCredentials: [registry:write] }, { OAuth2ClientCredentials: [registry:admin] }]
+      parameters:
+        - name: merchant_id
+          in: query
+          description: Required for admins. Merchants may omit it or pass their own.
+          schema: { type: string, format: uuid }
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/TerminalStatus' } }
+        - { name: health_state, in: query, schema: { type: string, enum: [HEALTHY, DEGRADED, UNREACHABLE] } }
+        - { name: cursor, in: query, description: next_cursor from the previous page., schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+      responses:
+        '200':
+          description: A page of terminals.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, next_cursor]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Terminal' } }
+                  next_cursor: { type: [string, 'null'], format: uuid, description: Null on the last page. }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+    post:
+      operationId: createTerminal
+      summary: Create a terminal record (registration phase 1, by the merchant)
+      description: >-
+        Creates the terminal as PENDING and returns a single-use registration_token,
+        valid for 15 minutes, that the device uses to register. The token is shown only once.
+      security:
+        - OAuth2ClientCredentials: [registry:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTerminalRequest' }
+      responses:
+        '201':
+          description: Terminal created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateTerminalResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  /v1/terminals/{terminal_id}/register:
+    post:
+      operationId: registerTerminal
+      summary: Submit a CSR (registration phase 2, by the terminal)
+      description: >-
+        Authenticated by the registration_token. Issues a client certificate, moves the
+        terminal to PENDING_ACTIVATION, and returns a one-time activation challenge.
+        A rejected attempt does not consume the token.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TerminalId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterTerminalRequest' }
+      responses:
+        '200':
+          description: Certificate issued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegisterTerminalResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  /v1/terminals/{terminal_id}/activate:
+    post:
+      operationId: activateTerminal
+      summary: Prove key possession and activate (registration phase 3, by the terminal)
+      description: Authenticated by a signature over the activation challenge with the certificate's key.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TerminalId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ActivateTerminalRequest' }
+      responses:
+        '200':
+          description: Terminal is ACTIVE.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActivateTerminalResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  # Lifecycle changes. Merchants may act only on their own terminals (others' return 404).
+  # Revocation is published to the CA before the status changes; if the CA fails, nothing changes (503).
+  /v1/terminals/{terminal_id}/suspend:
+    post:
+      operationId: suspendTerminal
+      summary: ACTIVE → SUSPENDED (merchant or admin). Certificate stays valid; transactions are blocked.
+      security: [{ OAuth2ClientCredentials: [registry:write] }, { OAuth2ClientCredentials: [registry:admin] }]
+      parameters: [{ $ref: '#/components/parameters/TerminalId' }]
+      requestBody: { $ref: '#/components/requestBodies/StatusChange' }
+      responses: &statusChangeResponses
+        '200': { $ref: '#/components/responses/StatusChanged' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  /v1/terminals/{terminal_id}/reinstate:
+    post:
+      operationId: reinstateTerminal
+      summary: SUSPENDED → ACTIVE (admin only).
+      security: [{ OAuth2ClientCredentials: [registry:admin] }]
+      parameters: [{ $ref: '#/components/parameters/TerminalId' }]
+      requestBody: { $ref: '#/components/requestBodies/StatusChange' }
+      responses: *statusChangeResponses
+  /v1/terminals/{terminal_id}/revoke:
+    post:
+      operationId: revokeTerminal
+      summary: ACTIVE, SUSPENDED or PENDING_ACTIVATION → REVOKED (merchant or admin). Revokes the certificate at the CA.
+      security: [{ OAuth2ClientCredentials: [registry:write] }, { OAuth2ClientCredentials: [registry:admin] }]
+      parameters: [{ $ref: '#/components/parameters/TerminalId' }]
+      requestBody: { $ref: '#/components/requestBodies/StatusChange' }
+      responses: *statusChangeResponses
+  /v1/terminals/{terminal_id}/decommission:
+    post:
+      operationId: decommissionTerminal
+      summary: ACTIVE or SUSPENDED → DECOMMISSIONED (merchant only). Revokes the certificate at the CA.
+      security: [{ OAuth2ClientCredentials: [registry:write] }]
+      parameters: [{ $ref: '#/components/parameters/TerminalId' }]
+      requestBody: { $ref: '#/components/requestBodies/StatusChange' }
+      responses: *statusChangeResponses
+  /v1/terminals/{terminal_id}/heartbeat:
+    post:
+      operationId: terminalHeartbeat
+      summary: Signed terminal heartbeat
+      description: >-
+        Authenticated by X-Signature over the exact request body bytes. Accepted only if sent_at is within
+        60 seconds of server time and later than the terminal's previous heartbeat. ACTIVE and SUSPENDED
+        terminals are updated (HEALTHY, last_heartbeat_at, firmware_version); a firmware change to an
+        uncertified version moves an ACTIVE terminal to SUSPENDED (reason UNCERTIFIED_FIRMWARE). A REVOKED
+        terminal's heartbeat is stored but changes nothing. Health then decays to DEGRADED after 90 seconds
+        and UNREACHABLE after 5 minutes of silence.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TerminalId'
+        - name: X-Signature
+          in: header
+          required: true
+          description: >-
+            Base64 signature over the raw request body with the terminal certificate's key: ECDSA (DER)
+            or RSA PKCS#1 v1.5, SHA-256.
+          schema: { type: string, pattern: '^[A-Za-z0-9+/]+={0,2}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sent_at, connectivity_type, latency_ms, firmware_version]
+              properties:
+                sent_at: { type: string, format: date-time, description: 'Terminal clock, with a UTC offset.' }
+                connectivity_type: { type: string, enum: [ETHERNET, CELLULAR, MESH] }
+                latency_ms: { type: integer, minimum: 0 }
+                firmware_version: { type: string, minLength: 1, maxLength: 64 }
+                battery_level: { type: integer, minimum: 0, maximum: 100 }
+      responses:
+        '200':
+          description: Heartbeat recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [terminal_id, status, health_state]
+                properties:
+                  terminal_id: { type: string, format: uuid }
+                  status: { $ref: '#/components/schemas/TerminalStatus' }
+                  health_state: { type: string, enum: [HEALTHY, DEGRADED, UNREACHABLE] }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  /v1/terminals/{terminal_id}:
+    get:
+      operationId: getTerminal
+      summary: Read one terminal
+      security: [{ OAuth2ClientCredentials: [registry:read] }, { OAuth2ClientCredentials: [registry:write] }, { OAuth2ClientCredentials: [registry:admin] }]
+      parameters: [{ $ref: '#/components/parameters/TerminalId' }]
+      responses:
+        '200':
+          description: The terminal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Terminal' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+    patch:
+      operationId: updateTerminal
+      summary: Replace the terminal's metadata
+      description: >-
+        Only metadata is mutable. device_model selects the hardware_id pattern and the certified firmware
+        list, so it cannot be changed after creation; any other field is a 400.
+      security: [{ OAuth2ClientCredentials: [registry:write] }, { OAuth2ClientCredentials: [registry:admin] }]
+      parameters: [{ $ref: '#/components/parameters/TerminalId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [metadata]
+              properties:
+                metadata: { type: object, additionalProperties: { type: string } }
+      responses:
+        '200':
+          description: The updated terminal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Terminal' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  /v1/terminals/{terminal_id}/certificates:
+    get:
+      operationId: listTerminalCertificates
+      summary: Certificate history, newest first
+      security: [{ OAuth2ClientCredentials: [registry:read] }, { OAuth2ClientCredentials: [registry:write] }, { OAuth2ClientCredentials: [registry:admin] }]
+      parameters: [{ $ref: '#/components/parameters/TerminalId' }]
+      responses:
+        '200':
+          description: Every certificate issued to the terminal.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/TerminalCertificate' } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  /v1/terminals/{terminal_id}/heartbeats:
+    get:
+      operationId: listTerminalHeartbeats
+      summary: Recent heartbeats, newest first (for debugging)
+      security: [{ OAuth2ClientCredentials: [registry:read] }, { OAuth2ClientCredentials: [registry:write] }, { OAuth2ClientCredentials: [registry:admin] }]
+      parameters:
+        - $ref: '#/components/parameters/TerminalId'
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+      responses:
+        '200':
+          description: The most recent heartbeats.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/TerminalHeartbeat' } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  /v1/terminals/{terminal_id}/events:
+    get:
+      operationId: listTerminalEvents
+      summary: Complete status change history, oldest first
+      security: [{ OAuth2ClientCredentials: [registry:read] }, { OAuth2ClientCredentials: [registry:write] }, { OAuth2ClientCredentials: [registry:admin] }]
+      parameters: [{ $ref: '#/components/parameters/TerminalId' }]
+      responses:
+        '200':
+          description: Every status change, in the order it happened.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/TerminalEvent' } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  /v1/terminals/{terminal_id}/authorization:
+    get:
+      operationId: authorizeTerminalTransaction
+      summary: May this terminal run this payment method for this amount right now? (routing engine)
+      description: >-
+        Read live from the registry on every call, so a status, firmware or certification change applies to
+        the next call. A refusal is a 200 with authorized false and a reason: TERMINAL_NOT_ACTIVE (any status
+        but ACTIVE), TERMINAL_UNREACHABLE (no heartbeat in 5 minutes; DEGRADED still authorizes),
+        FIRMWARE_UNCERTIFIED, CERTIFICATION_EXPIRED, METHOD_NOT_CERTIFIED (also when the terminal has no
+        certification profile) or LIMIT_EXCEEDED (per-transaction limit; the per-day limit is not enforced
+        until the transaction engine tracks daily totals). An unknown terminal is 404 TERMINAL_NOT_FOUND.
+      security: [{ OAuth2ClientCredentials: [registry:authorize] }]
+      parameters:
+        - $ref: '#/components/parameters/TerminalId'
+        - name: payment_method
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/TransactionRequest/properties/payment_method' }
+        - name: amount
+          in: query
+          required: true
+          description: Minor units.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: The decision.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TerminalAuthorization' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
 components:
+  requestBodies:
+    StatusChange:
+      required: false
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              reason: { type: string, maxLength: 256, description: Recorded in the audit log (and as the revocation reason). }
+  parameters:
+    TerminalId:
+      name: terminal_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
   securitySchemes:
     # Merchant SDK / merchant backend → cloud API.
     OAuth2ClientCredentials:
@@ -128,21 +485,37 @@ components:
             transactions:read: Read transaction status and history
             registry:read: Read terminal registry entries
             registry:write: Register and update terminals
+            registry:admin: Platform-admin terminal operations (any merchant's terminals; reinstate)
+            registry:authorize: Routing engine's per-transaction terminal authorization check
     # Terminal → cloud (T2C).
     MutualTLS:
       type: mutualTLS
       description: >-
-        The terminal presents an X.509 client certificate issued at registration in the
-        Terminal Registry. The cloud validates the chain and checks the certificate's
-        terminal against the registry; a request whose terminal_id differs from the
-        certificate's terminal is rejected with 403.
+        The terminal presents the X.509 client certificate issued at registration; its terminal_id
+        is the URI SAN urn:synapsepay:terminal:{terminal_id}. The gateway rejects, during the TLS
+        handshake, any certificate that doesn't chain to the platform CA or is on its CRL. It then
+        rejects with 403, before the request reaches the API, a certificate with no terminal URI
+        SAN, a path terminal_id that differs from the certificate's, or a terminal that isn't
+        ACTIVE. Heartbeats are exempt from the ACTIVE check, so SUSPENDED terminals keep reporting.
   responses:
+    StatusChanged:
+      description: Status changed.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [terminal_id, status, status_changed_at]
+            properties:
+              terminal_id: { type: string, format: uuid }
+              status: { $ref: '#/components/schemas/TerminalStatus' }
+              status_changed_at: { type: string, format: date-time }
     Error:
       description: >-
         The request was rejected before a transaction was created (400 invalid body,
         401 not authenticated, 403 missing scope or terminal_id not matching the client
-        certificate, 409 idempotency_key reused with a different body, 422 unknown
-        terminal or merchant, 5XX server error). Declines are not errors here: they
+        certificate, 404 unknown terminal on a terminal path, 409 idempotency_key reused
+        with a different body or a conflicting state, 422 unknown terminal or merchant
+        or an unapproved device model, 5XX server error). Declines are not errors here: they
         return 201 with status FAILED and the error inside the transaction.
       content:
         application/json:
@@ -591,6 +964,10 @@ components:
       then: { required: [error] }
       else: { not: { required: [error] } }
 
+    TerminalStatus:
+      type: string
+      enum: [PENDING, PENDING_ACTIVATION, ACTIVE, SUSPENDED, REVOKED, DECOMMISSIONED, REJECTED]
+
     TransactionStatus:
       type: string
       enum:
@@ -718,6 +1095,178 @@ components:
             properties:
               from: { $ref: '#/components/schemas/TransactionStatus' }
               to: { $ref: '#/components/schemas/TransactionStatus' }
+
+    CreateTerminalRequest:
+      type: object
+      additionalProperties: false
+      required: [merchant_id, device_serial, device_model]
+      properties:
+        merchant_id:
+          type: string
+          format: uuid
+          description: Must be the authenticated merchant.
+        device_serial: { type: string, minLength: 1, maxLength: 64, description: Hardware serial; unique. }
+        device_model: { type: string, minLength: 1, maxLength: 64, description: Must be an approved model. }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+          description: Free-form, e.g. a location label.
+
+    CreateTerminalResponse:
+      type: object
+      required: [terminal_id, status, registration_token, registration_token_expires_at]
+      properties:
+        terminal_id: { type: string, format: uuid }
+        status: { type: string, const: PENDING }
+        registration_token: { type: string, description: Single-use. Shown only in this response. }
+        registration_token_expires_at: { type: string, format: date-time }
+
+    RegisterTerminalRequest:
+      type: object
+      additionalProperties: false
+      required: [registration_token, csr_pem, secure_element_id, firmware_version, hardware_id, device_fingerprint]
+      properties:
+        registration_token: { type: string, minLength: 1, maxLength: 128 }
+        csr_pem:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          description: PKCS#10 CSR, EC P-256 or RSA >= 2048. Its subject is ignored; the certificate's CN is the terminal_id.
+        secure_element_id: { $ref: '#/components/schemas/FingerprintPart' }
+        firmware_version: { $ref: '#/components/schemas/FingerprintPart' }
+        hardware_id:
+          $ref: '#/components/schemas/FingerprintPart'
+          description: Must match the registered model's hardware_id format.
+        device_fingerprint:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Lowercase hex SHA-256 of "secure_element_id|firmware_version|hardware_id".
+
+    FingerprintPart:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[^|]+$'
+
+    RegisterTerminalResponse:
+      type: object
+      required: [terminal_id, status, certificate_pem, certificate_serial, certificate_expires_at,
+                 ca_certificate_pem, activation_challenge, activation_challenge_expires_at]
+      properties:
+        terminal_id: { type: string, format: uuid }
+        status: { type: string, const: PENDING_ACTIVATION }
+        certificate_pem: { type: string }
+        certificate_serial: { type: string, description: Hex X.509 serial. }
+        certificate_expires_at: { type: string, format: date-time }
+        ca_certificate_pem: { type: string, description: The issuing intermediate CA. }
+        activation_challenge:
+          type: string
+          contentEncoding: base64
+          description: Sign the decoded bytes with SHA-256 using the certificate's key.
+        activation_challenge_expires_at: { type: string, format: date-time }
+
+    ActivateTerminalRequest:
+      type: object
+      additionalProperties: false
+      required: [signed_challenge]
+      properties:
+        signed_challenge:
+          type: string
+          contentEncoding: base64
+          minLength: 1
+          maxLength: 1024
+          description: ECDSA (DER) or RSA PKCS#1 v1.5 signature, SHA-256, over the decoded challenge.
+
+    ActivateTerminalResponse:
+      type: object
+      required: [terminal_id, status, activated_at]
+      properties:
+        terminal_id: { type: string, format: uuid }
+        status: { type: string, const: ACTIVE }
+        activated_at: { type: string, format: date-time }
+
+    Terminal:
+      type: object
+      required: [terminal_id, merchant_id, device_serial, device_model, firmware_version, status, health_state,
+                 last_heartbeat_at, certification_profile_id, registered_at, activated_at, status_changed_at, metadata]
+      properties:
+        terminal_id: { type: string, format: uuid }
+        merchant_id: { type: string, format: uuid }
+        device_serial: { type: string }
+        device_model: { type: string }
+        firmware_version: { type: [string, 'null'] }
+        status: { $ref: '#/components/schemas/TerminalStatus' }
+        health_state: { type: string, enum: [HEALTHY, DEGRADED, UNREACHABLE], description: Refreshed every 30 seconds. }
+        last_heartbeat_at: { type: [string, 'null'], format: date-time }
+        certification_profile_id: { type: [string, 'null'], format: uuid }
+        registered_at: { type: string, format: date-time }
+        activated_at: { type: [string, 'null'], format: date-time }
+        status_changed_at: { type: string, format: date-time }
+        metadata: { type: object, additionalProperties: { type: string } }
+
+    TerminalCertificate:
+      type: object
+      required: [serial_number, issued_at, expires_at, revoked_at, revocation_reason, current]
+      properties:
+        serial_number: { type: string }
+        issued_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        revoked_at: { type: [string, 'null'], format: date-time }
+        revocation_reason: { type: [string, 'null'] }
+        current: { type: boolean, description: The certificate the terminal currently authenticates with. }
+
+    TerminalHeartbeat:
+      type: object
+      required: [sent_at, received_at, connectivity_type, latency_ms, firmware_version, battery_level]
+      properties:
+        sent_at: { type: string, format: date-time }
+        received_at: { type: string, format: date-time }
+        connectivity_type: { type: string, enum: [ETHERNET, CELLULAR, MESH] }
+        latency_ms: { type: integer }
+        firmware_version: { type: string }
+        battery_level: { type: [integer, 'null'] }
+
+    TerminalEvent:
+      type: object
+      required: [occurred_at, action, from_status, to_status, actor_type, reason]
+      properties:
+        occurred_at: { type: string, format: date-time }
+        action: { type: string, examples: [create, register, activate, suspend, reinstate, revoke, decommission, reject] }
+        from_status: { oneOf: [{ $ref: '#/components/schemas/TerminalStatus' }, { type: 'null' }] }
+        to_status: { $ref: '#/components/schemas/TerminalStatus' }
+        actor_type: { type: string, enum: [TERMINAL, MERCHANT, ADMIN, SYSTEM] }
+        reason: { type: [string, 'null'] }
+
+    TerminalAuthorization:
+      type: object
+      required: [terminal_id, authorized, status, reason]
+      properties:
+        terminal_id: { type: string, format: uuid }
+        authorized: { type: boolean }
+        status: { $ref: '#/components/schemas/TerminalStatus' }
+        reason:
+          type: [string, 'null']
+          enum: [TERMINAL_NOT_ACTIVE, TERMINAL_UNREACHABLE, FIRMWARE_UNCERTIFIED, CERTIFICATION_EXPIRED,
+                 METHOD_NOT_CERTIFIED, LIMIT_EXCEEDED, null]
+        health_state: { type: string, enum: [HEALTHY, DEGRADED], description: Only when authorized. }
+        certification:
+          type: object
+          description: Only when authorized.
+          required: [profile_id, certified_for, expires_at]
+          properties:
+            profile_id: { type: string, format: uuid }
+            certified_for:
+              type: array
+              items: { $ref: '#/components/schemas/TransactionRequest/properties/payment_method' }
+            expires_at: { type: string, format: date-time }
+        limits:
+          type: object
+          description: Only when authorized. Minor units.
+          required: [per_transaction, per_day]
+          properties:
+            per_transaction: { type: integer }
+            per_day: { type: integer }
+        status_changed_at: { type: string, format: date-time, description: Only when not authorized. }
 
     CardDetails:
       type: object
