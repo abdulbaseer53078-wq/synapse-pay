@@ -1,0 +1,12 @@
+{
+  "synthetic": true,
+  "description": "SYNTHETIC 0800: generated, not from an acquirer. Replace with a sanitized real dump.",
+  "dialect": "synthetic-host.json",
+  "hex": "303830308220000000000000040000000000000031313037313032303030303030313035333031",
+  "mti": "0800",
+  "fields": {
+    "7": "1107102000",
+    "11": "000105",
+    "70": "301"
+  }
+}

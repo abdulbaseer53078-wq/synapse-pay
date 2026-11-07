@@ -1,0 +1,7 @@
+{
+  "2": { "type": "LLVAR", "max_length": 19, "format": "n" },
+  "3": { "type": "FIXED", "length": 6, "format": "n" },
+  "4": { "type": "FIXED", "length": 12, "format": "n" },
+  "39": { "type": "FIXED", "length": 2, "format": "an" },
+  "48": { "type": "LLLVAR", "max_length": 999, "format": "ans" }
+}
