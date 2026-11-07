@@ -208,10 +208,12 @@ def test_merchant_must_own_the_terminal(pay):
     assert r.status_code == 422 and r.json()["error_code"] == "MERCHANT_NOT_FOUND"
 
 
-def test_an_unregistered_method_is_422(pay):
-    # CARD, UPI, QR and WALLET are adapters now; OFFLINE is not registered until Step 13.
-    r, _ = pay(payment_method="OFFLINE", method_details={})
-    assert r.status_code == 422 and r.json()["error_code"] == "INVALID_REQUEST"
+def test_an_unknown_method_is_rejected_by_the_contract_enum(pay):
+    """`payment_method` is an enum in the contract, so an invented value never reaches the registry: FastAPI
+    rejects it as a schema violation (400 INVALID_REQUEST). The registry's 422 is for a value the enum allows
+    but no adapter serves, and that is covered in tests/test_methods.py."""
+    r, _ = pay(payment_method="CRYPTO", method_details={})
+    assert r.status_code == 400 and r.json()["error_code"] == "INVALID_REQUEST"
 
 
 @pytest.mark.parametrize("details,field", [
