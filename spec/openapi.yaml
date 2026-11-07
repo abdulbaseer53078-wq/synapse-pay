@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.6.0
+  version: 1.7.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
     goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions.
@@ -604,6 +604,89 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         5XX: { $ref: '#/components/responses/Error' }
+  /v1/transactions/sync:
+    post:
+      operationId: syncOfflineTransactions
+      summary: Upload a batch of transactions a terminal accepted while offline
+      description: >-
+        Terminals queue sales locally when connectivity drops and upload them in one batch when it comes back:
+        fifty requests would drain a battery and drop packets on the same bad link. Each item is handled
+        independently — one bad item must not fail the other forty-nine — so the response is a per-item result
+        and the status stays 200 even when some items were declined. (207 Multi-Status is tempting but many
+        HTTP clients treat it as an error and retry the whole batch.)
+        The cloud re-checks the offline_limits from the method's capability descriptor, the item age and the
+        terminal signature; it is the authority. The SDK enforces the same limits first so a customer is never
+        told "yes" for a payment that will fail an hour later.
+      security:
+        - MutualTLS: []
+        - OAuth2ClientCredentials: [transactions:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [transactions]
+              properties:
+                transactions:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [offline_reference, local_timestamp, idempotency_key, amount, currency, payment_method,
+                               terminal_id, merchant_id, method_details, signature]
+                    properties:
+                      offline_reference:
+                        type: string
+                        format: uuid
+                        description: Generated on the terminal; the per-item key of the batch.
+                      local_timestamp:
+                        type: string
+                        format: date-time
+                        description: >-
+                          The terminal's clock when the sale was accepted offline. Used for the
+                          offline_limits.max_age_minutes check, so a terminal that was offline for a week
+                          cannot flush seven-day-old sales.
+                      idempotency_key: { $ref: '#/components/schemas/TransactionRequest/properties/idempotency_key' }
+                      amount: { $ref: '#/components/schemas/TransactionRequest/properties/amount' }
+                      currency: { $ref: '#/components/schemas/TransactionRequest/properties/currency' }
+                      payment_method: { $ref: '#/components/schemas/TransactionRequest/properties/payment_method' }
+                      terminal_id: { $ref: '#/components/schemas/TransactionRequest/properties/terminal_id' }
+                      merchant_id: { $ref: '#/components/schemas/TransactionRequest/properties/merchant_id' }
+                      method_details: { $ref: '#/components/schemas/TransactionRequest/properties/method_details' }
+                      signature:
+                        type: string
+                        description: >-
+                          Base64 signature by the terminal's registration key over the canonical item. Without
+                          it, anyone who can edit the terminal's local queue can inflate an amount before it
+                          syncs.
+      responses:
+        '200':
+          description: Per-item outcomes, in the order submitted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [offline_reference, status]
+                      properties:
+                        offline_reference: { type: string, format: uuid }
+                        transaction_id: { type: string, description: Present when the item was accepted. }
+                        status: { $ref: '#/components/schemas/TransactionStatus' }
+                        error: { $ref: '#/components/schemas/Error' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
   /v1/webhooks/upi:
     post:
       operationId: upiWebhook
@@ -1129,11 +1212,13 @@ components:
         supports_partial_capture: false
         settlement_timeline: T+1_on_sync
         auth_type: local_fraud_screening
-        is_synchronous: false
+        is_synchronous: true
+        offline_limits: { max_per_txn: 500000, currency: INR, max_age_minutes: 1440 }
         dispute_rules: { framework: NONE, dispute_window_days: 0 }
         transitions:
-          - { from: INITIATED, to: PENDING }
-          - { from: PENDING, to: AUTHORIZED }
+          - { from: INITIATED, to: PENDING_OFFLINE }
+          - { from: PENDING_OFFLINE, to: PENDING }
+          - { from: PENDING_OFFLINE, to: FAILED }
           - { from: PENDING, to: FAILED }
           - { from: AUTHORIZED, to: SETTLED }
   schemas:
@@ -1380,6 +1465,18 @@ components:
         auth_code:
           type: string
           description: Authorization code from the issuer, if applicable.
+        next_action:
+          type: object
+          description: >-
+            The SDK must open `url` for the customer to finish the payment (wallet login, 3-D Secure). Present
+            only when the rail cannot complete in this call; otherwise the response is final or PENDING. Same
+            shape the payment intent uses, so the SDK has one branch to write, not two.
+          required: [type, url]
+          properties:
+            type:
+              type: string
+              enum: [WALLET_REDIRECT, THREE_DS_REDIRECT]
+            url: { type: string, format: uri }
         created_at:
           type: string
           format: date-time
@@ -1408,6 +1505,7 @@ components:
       enum:
         - INITIATED
         - PENDING
+        - PENDING_OFFLINE
         - AUTHORIZED
         - CAPTURED
         - SETTLED
@@ -1515,6 +1613,20 @@ components:
             rail answers PENDING and settles through a webhook (UPI collect, wallet OTP, QR, offline sync), so
             the SDK must wait for the webhook or poll. The engine uses it to know that a PENDING result is the
             method working as designed, not a timeout.
+        offline_limits:
+          type: object
+          description: >-
+            Present only for methods accepted without connectivity. The SDK enforces these locally, because the
+            cloud cannot refuse a transaction it has not received yet; the cloud re-checks them on sync and is
+            the authority that can fail the payment.
+          required: [max_per_txn, currency, max_age_minutes]
+          properties:
+            max_per_txn: { type: integer, minimum: 1, description: Minor units, per transaction. }
+            currency: { type: string, pattern: '^[A-Z]{3}$' }
+            max_age_minutes:
+              type: integer
+              minimum: 1
+              description: A queued payment older than this is refused on sync.
         dispute_rules:
           type: object
           additionalProperties: false
@@ -1772,7 +1884,7 @@ components:
     WalletDetails:
       type: object
       additionalProperties: false
-      required: [wallet_provider, wallet_token]
+      required: [wallet_provider]
       properties:
         wallet_provider:
           type: string
@@ -1780,7 +1892,10 @@ components:
         wallet_token:
           type: string
           minLength: 1
-          description: The wallet's opaque reference.
+          description: >-
+            Optional since 1.7.0. Present: a direct debit against a saved wallet (returning customer, settled
+            in one call). Omitted: a redirect flow — the response carries next_action.url for the customer to
+            log in and authorise at the provider (first-time customer).
 
     QrDetails:
       type: object
