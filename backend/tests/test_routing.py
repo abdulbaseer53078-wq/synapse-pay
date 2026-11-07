@@ -123,7 +123,16 @@ def test_cascade_stops_after_two_retries():
     assert result.status == "FAILED" and len(trail) == 3
 
 
-def test_a_pending_result_counts_as_transient():
-    """A provider that timed out after sending may have our money; move on rather than report success."""
+def test_pending_without_a_next_action_cascades():
+    """A provider that timed out after sending may have our money: try the backup so the payment still happens."""
     result, trail = cascade(["a", "b"], lambda host: MethodResult(status="PENDING") if host == "a" else _ok(host))
     assert result.method_reference == "ref_b" and len(trail) == 2
+
+
+def test_pending_awaiting_the_customer_does_not_cascade():
+    """UPI collect: their phone is ringing. A second collect would show them two PIN prompts."""
+    waiting = MethodResult(status="PENDING", next_action={"type": "UPI_COLLECT", "url": "upi://pay?pa=a@b"})
+    result, trail = cascade(["a", "b"], lambda host: waiting if host == "a" else _ok(host))
+
+    assert result is waiting and len(trail) == 1
+    assert trail[0]["retryable"] is False
