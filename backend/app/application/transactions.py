@@ -49,6 +49,21 @@ class MerchantMismatch(RegistrationError):
     code = "MERCHANT_NOT_FOUND"
 
 
+class IntentNotPayable(RegistrationError):
+    """payment_intent_id names an intent this terminal can't pay right now (wrong terminal, amount, state)."""
+    code = "INVALID_REQUEST"
+
+
+def parse_public_id(value: str, prefix: str) -> UUID | None:
+    """pi_<32 hex> / txn_<32 hex> → UUID, or None if malformed."""
+    if not value.startswith(prefix) or len(value) != len(prefix) + 32:
+        return None
+    try:
+        return UUID(hex=value[len(prefix):])
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class CardResult:
     """What the card service answered. `status` is a TransactionStatus; `error` is the spec's Error or None."""
@@ -96,6 +111,8 @@ class NewTransaction:
     capture_mode: str
     card_network: str | None
     metadata: dict[str, str]
+    webhook_url: str | None = None
+    payment_intent_id: UUID | None = None  # set: this payment completes a terminal checkout (Step 6)
 
 
 @dataclass(frozen=True)
@@ -105,6 +122,7 @@ class Claim:
     replay: dict | None = None           # stored response of a finished request with the same body
     conflict: bool = False               # same key, different body
     in_flight: bool = False              # same key and body, still running
+    intent_error: str | None = None      # payment_intent_id given but unusable: why
 
 
 class TransactionRepository(Protocol):
@@ -160,13 +178,21 @@ class TransactionService:
             raise MethodNotSupported(f"{body['payment_method']} isn't supported yet; CARD is")
 
         details = body["method_details"]
+        intent_id = None
+        if "payment_intent_id" in body:
+            intent_id = parse_public_id(body["payment_intent_id"], "pi_")
+            if intent_id is None:
+                raise IntentNotPayable("payment_intent_id is not a payment intent ID")
         txn = NewTransaction(
             idempotency_key=UUID(body["idempotency_key"]), request_hash=request_hash(body), merchant_id=merchant,
             terminal_id=caller_terminal, amount=body["amount"], currency=body["currency"],
             payment_method=body["payment_method"], capture_mode=body.get("capture_mode", "AUTO"),
-            card_network=details.get("card_network"), metadata=body.get("metadata") or {})
+            card_network=details.get("card_network"), metadata=body.get("metadata") or {},
+            webhook_url=body.get("webhook_url"), payment_intent_id=intent_id)
 
         claim = self.repo.claim(txn)
+        if claim.intent_error:
+            raise IntentNotPayable(claim.intent_error)
         if claim.conflict:
             raise IdempotencyConflict("idempotency_key was already used with a different request body")
         if claim.in_flight:

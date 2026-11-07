@@ -60,6 +60,8 @@ pub struct CardResult {
 pub struct AuthenticateRequest {
     pub transaction_id: String,
     pub encrypted_card_data: String,
+    #[serde(default)]
+    pub encrypted_cvv: Option<String>,
     pub amount: u64,
     pub currency: String,
 }
@@ -147,6 +149,9 @@ fn card_error(e: HsmError) -> FlowError {
 impl CardFlow {
     pub fn authenticate(&self, req: &AuthenticateRequest) -> Result<AuthenticateResult, FlowError> {
         let pan = self.hsm.decrypt_pan(&req.encrypted_card_data).map_err(card_error)?;
+        if let Some(cvv) = &req.encrypted_cvv {
+            self.hsm.verify_cvv(cvv).map_err(card_error)?;
+        }
         Ok(AuthenticateResult { three_ds: simulated_three_ds(pan.as_str()), card_bin: pan.bin(), card_last4: pan.last4() })
     }
 
