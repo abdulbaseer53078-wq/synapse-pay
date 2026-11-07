@@ -175,6 +175,37 @@ async fn timeout_gives_up_at_the_deadline_with_the_outcome_unknown() {
     assert_eq!(resp.response_code, "00");
 }
 
+fn reversal_of(original: &Transaction) -> Transaction {
+    Transaction {
+        transaction_id: format!("{}_rev", original.transaction_id),
+        kind: TransactionKind::Reversal { original_transaction_id: original.transaction_id.clone() },
+        ..original.clone()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn timed_out_transaction_is_reversed_quoting_the_original() {
+    let mock = start_mock();
+    let host = connector(&mock).await;
+    let original = auth(TIMEOUT);
+    let err = host.send_transaction(&ctx(Duration::from_secs(1)), &original).await.unwrap_err();
+    assert!(err.outcome_unknown());
+
+    assert!(host.link().wait_up(Duration::from_secs(5)).await);
+    // The mock answers "00" only if DE 90 names an MTI and STAN it really received, else "25".
+    let resp = host.send_transaction(&ctx(Duration::from_secs(5)), &reversal_of(&original)).await.unwrap();
+    assert_eq!(resp.response_code, "00");
+    assert!(matches!(resp.decision, Decision::Approved { .. }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reversal_without_a_known_original_is_not_sent() {
+    let mock = start_mock();
+    let host = connector(&mock).await;
+    let err = host.send_transaction(&ctx(Duration::from_secs(5)), &reversal_of(&auth(APPROVE))).await.unwrap_err();
+    assert!(matches!(err, HostError::Unavailable(_)), "{err:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dropped_connection_fails_cleanly_then_reconnects() {
     let mock = start_mock();

@@ -10,6 +10,8 @@ The outcome is chosen by the request amount (DE 4, minor units), as acquirer san
     9900  system error: drop the connection without answering
     else  approve: DE 39 "00" with an authorization code (DE 38)
 An 0800 network echo is answered with an 0810, DE 39 "00".
+A reversal (0400/0420) never sleeps or drops: it is answered "00" if DE 90 quotes the MTI and STAN of a request
+this mock received, else "25" (unable to locate original), whatever its amount.
 
     python mock_host.py --cert host.pem --key host-key.pem --client-ca ca.pem --dialect dialect.json [--port 0]
 
@@ -120,13 +122,26 @@ def log(line):
     print(line, flush=True)
 
 
+SEEN = set()  # (MTI, STAN) of every financial request received, for checking reversals' DE 90
+SEEN_LOCK = threading.Lock()
+
+
 def answer(dialect, conn, send_lock, mti, req, sleep):
     amount = int(req.get(4, b"0") or 0)
     if mti == "0800":
         scenario, resp_mti = "echo", "0810"
         resp = {n: req[n] for n in (7, 11, 70) if n in req}
         resp[39] = b"00"
+    elif mti in ("0400", "0420"):
+        original = req.get(90, b"").decode()
+        with SEEN_LOCK:
+            found = (original[:4], original[4:10]) in SEEN
+        scenario, resp_mti = ("reversed" if found else "unknown-original"), "%04d" % (int(mti) + 10)
+        resp = {n: req[n] for n in ECHOED if n in req}
+        resp[39] = b"00" if found else b"25"
     else:
+        with SEEN_LOCK:
+            SEEN.add((mti, req.get(11, b"").decode()))
         scenario, resp_mti = SCENARIOS.get(amount, "approve"), "%04d" % (int(mti) + 10)
         resp = {n: req[n] for n in ECHOED if n in req}
         resp[39] = b"51" if scenario == "decline" else b"00"
