@@ -18,6 +18,18 @@
 //!
 //! The AAD is the usage ("data" or "pin"), so a PIN block can't be replayed as card data or vice versa.
 //! Card data plaintext is the PAN as ASCII digits. A PIN block's plaintext is an ISO 9564 format 0 block.
+//!
+//! Browsers and merchant apps (Step 6) have no injected keys, so they encrypt to the HSM's public
+//! *checkout key* instead (ECIES over P-256, which WebCrypto, Android and iOS all support natively):
+//!
+//! ```text
+//! sp2.<ephemeral P-256 public key, 65-byte uncompressed SEC1, base64url>.<12-byte nonce || AES-GCM ct+tag>
+//! key = HKDF-SHA256(ECDH shared secret, salt = ephemeral public key bytes,
+//!                   info = "synapsepay/checkout/v1/<usage>")
+//! ```
+//!
+//! shortcut: the checkout private key is loaded from a PEM file (or generated at startup); in production it
+//! lives in the HSM and never leaves it.
 
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -28,6 +40,7 @@ use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
 
 const PREFIX: &str = "sp1";
+const CHECKOUT_PREFIX: &str = "sp2";
 const KSN_LEN: usize = 10;
 const NONCE_LEN: usize = 12;
 
@@ -84,10 +97,16 @@ pub trait Hsm: Send + Sync {
     /// shortcut: a real HSM translates it to the acquirer's zone PIN key for DE 52; the synthetic host
     /// dialect has no DE 52 yet, so the block is checked here and not forwarded.
     fn verify_pin_block(&self, envelope: &str, pan: &ClearPan) -> Result<(), HsmError>;
+
+    /// The public checkout key as a JWK, for browsers and apps to encrypt card data to (sp2), if configured.
+    fn checkout_public_jwk(&self) -> Option<String> {
+        None
+    }
 }
 
 pub struct SimHsm {
     bdk: Zeroizing<Vec<u8>>,
+    checkout: Option<p256::SecretKey>,
 }
 
 impl SimHsm {
@@ -99,7 +118,7 @@ impl SimHsm {
             bdk.zeroize();
             return Err(format!("BDK must be 16 or 32 bytes, got {len}"));
         }
-        Ok(Self { bdk: Zeroizing::new(bdk) })
+        Ok(Self { bdk: Zeroizing::new(bdk), checkout: None })
     }
 
     pub fn from_hex(hex: &str) -> Result<Self, String> {
@@ -109,6 +128,12 @@ impl SimHsm {
         }
         let bytes = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
         Self::new(bytes)
+    }
+
+    /// Enables sp2 (browser and app) envelopes with this private checkout key.
+    pub fn with_checkout_key(mut self, key: p256::SecretKey) -> Self {
+        self.checkout = Some(key);
+        self
     }
 
     fn key(&self, ksn: &[u8], usage: &str) -> Zeroizing<[u8; 32]> {
@@ -121,10 +146,15 @@ impl SimHsm {
 
     fn open(&self, envelope: &str, usage: &str) -> Result<Zeroizing<Vec<u8>>, HsmError> {
         let mut parts = envelope.split('.');
-        let (Some(PREFIX), Some(ksn), Some(body), None) = (parts.next(), parts.next(), parts.next(), parts.next())
+        let (Some(prefix), Some(ksn), Some(body), None) = (parts.next(), parts.next(), parts.next(), parts.next())
         else {
-            return Err(HsmError::Malformed("expected sp1.<ksn>.<ciphertext>"));
+            return Err(HsmError::Malformed("expected sp1.<ksn>.<ciphertext> or sp2.<key>.<ciphertext>"));
         };
+        match prefix {
+            PREFIX => {}
+            CHECKOUT_PREFIX => return self.open_checkout(ksn, body, usage),
+            _ => return Err(HsmError::Malformed("unknown envelope version")),
+        }
         let ksn = B64.decode(ksn).map_err(|_| HsmError::Malformed("KSN is not base64url"))?;
         let body = B64.decode(body).map_err(|_| HsmError::Malformed("ciphertext is not base64url"))?;
         if ksn.len() != KSN_LEN {
@@ -140,6 +170,49 @@ impl SimHsm {
             .decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad: usage.as_bytes() })
             .map(Zeroizing::new)
             .map_err(|_| HsmError::Undecryptable)
+    }
+
+    fn checkout_key(epk: &[u8], shared: &p256::ecdh::SharedSecret, usage: &str) -> Zeroizing<[u8; 32]> {
+        let mut key = Zeroizing::new([0u8; 32]);
+        shared
+            .extract::<Sha256>(Some(epk))
+            .expand(format!("synapsepay/checkout/v1/{usage}").as_bytes(), key.as_mut())
+            .expect("32 bytes is a valid HKDF-SHA256 length");
+        key
+    }
+
+    fn open_checkout(&self, epk: &str, body: &str, usage: &str) -> Result<Zeroizing<Vec<u8>>, HsmError> {
+        let secret = self.checkout.as_ref().ok_or(HsmError::Malformed("checkout encryption is not enabled"))?;
+        let epk = B64.decode(epk).map_err(|_| HsmError::Malformed("ephemeral key is not base64url"))?;
+        let body = B64.decode(body).map_err(|_| HsmError::Malformed("ciphertext is not base64url"))?;
+        let public = p256::PublicKey::from_sec1_bytes(&epk)
+            .map_err(|_| HsmError::Malformed("ephemeral key is not a P-256 point"))?;
+        if epk.len() != 65 || body.len() <= NONCE_LEN + 16 {
+            return Err(HsmError::Malformed("wrong key or ciphertext length"));
+        }
+        let shared = p256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), public.as_affine());
+        let key = Self::checkout_key(&epk, &shared, usage);
+        let cipher = Aes256Gcm::new_from_slice(key.as_ref()).expect("32-byte key");
+        let (nonce, ciphertext) = body.split_at(NONCE_LEN);
+        cipher
+            .decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad: usage.as_bytes() })
+            .map(Zeroizing::new)
+            .map_err(|_| HsmError::Undecryptable)
+    }
+
+    /// What a browser or app does: encrypt to the checkout public key. For tests and simulators.
+    pub fn seal_checkout(public: &p256::PublicKey, ephemeral: &p256::SecretKey, nonce: [u8; NONCE_LEN], usage: &str,
+                         plaintext: &[u8]) -> String {
+        let epk = ephemeral.public_key().to_sec1_bytes();
+        let shared = p256::ecdh::diffie_hellman(ephemeral.to_nonzero_scalar(), public.as_affine());
+        let key = Self::checkout_key(&epk, &shared, usage);
+        let cipher = Aes256Gcm::new_from_slice(key.as_ref()).expect("32-byte key");
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad: usage.as_bytes() })
+            .expect("AES-GCM encryption can't fail for these sizes");
+        let mut out = nonce.to_vec();
+        out.extend_from_slice(&ciphertext);
+        format!("{CHECKOUT_PREFIX}.{}.{}", B64.encode(&epk), B64.encode(out))
     }
 
     /// What a simulated terminal does: encrypt under the key for this KSN. Used by tests and the demo.
@@ -210,6 +283,10 @@ impl Hsm for SimHsm {
             return Err(HsmError::InvalidContent("not an ISO 9564 format 0 PIN block for this card"));
         }
         Ok(())
+    }
+
+    fn checkout_public_jwk(&self) -> Option<String> {
+        self.checkout.as_ref().map(|k| k.public_key().to_jwk_string())
     }
 }
 
@@ -296,6 +373,23 @@ mod tests {
         // A block made for another card doesn't decode as format 0 for this one.
         let other = hsm.seal([3; 10], [4; 12], "pin", &format0_pin_block("1234", "5500000000000004"));
         assert!(hsm.verify_pin_block(&other, &pan).is_err());
+    }
+
+    #[test]
+    fn checkout_envelope_round_trip() {
+        let server = p256::SecretKey::random(&mut rand_core::OsRng);
+        let hsm = hsm().with_checkout_key(server.clone());
+        let browser = p256::SecretKey::random(&mut rand_core::OsRng);
+        let envelope = SimHsm::seal_checkout(&server.public_key(), &browser, [7; 12], "data", PAN.as_bytes());
+        assert!(envelope.starts_with("sp2."));
+        assert_eq!(hsm.decrypt_pan(&envelope).unwrap().as_str(), PAN);
+        assert!(hsm.checkout_public_jwk().unwrap().contains("\"crv\":\"P-256\""));
+        // Encrypted to someone else's key: undecryptable.
+        let other = p256::SecretKey::random(&mut rand_core::OsRng);
+        let wrong = SimHsm::seal_checkout(&other.public_key(), &browser, [7; 12], "data", PAN.as_bytes());
+        assert_eq!(hsm.decrypt_pan(&wrong).unwrap_err(), HsmError::Undecryptable);
+        // Without a checkout key configured, sp2 is refused.
+        assert!(matches!(self::hsm().decrypt_pan(&envelope), Err(HsmError::Malformed(_))));
     }
 
     #[test]
