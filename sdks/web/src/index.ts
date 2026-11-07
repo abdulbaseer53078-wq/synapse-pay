@@ -204,7 +204,9 @@ export function SynapsePay(options: SynapsePayOptions) {
                                          apiOrigin);
       });
       if (reply.error) return { error: fromApi(reply.error) };
-      return afterConfirm(reply.intent as PaymentIntent, clientSecret);
+      const outcome = await afterConfirm(reply.intent as PaymentIntent, clientSecret);
+      if (outcome.paymentIntent?.status === "SUCCEEDED") card.clear(); // nothing left on screen after paying
+      return outcome;
     },
 
     /**
