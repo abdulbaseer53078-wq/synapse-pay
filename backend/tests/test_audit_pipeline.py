@@ -154,7 +154,9 @@ def test_verifier_detects_a_deleted_worm_object(clean_chain, audit_pool, worm):
     store = PostgresAuditStore(audit_pool)
     store.ingest(worm)
 
-    sorted(worm.root.rglob("*.json"))[1].unlink()
+    victim = sorted(worm.root.rglob("*.json"))[1]
+    os.chmod(victim, 0o644)  # objects are written 0o444; Windows refuses to delete a read-only file
+    victim.unlink()
     result = AuditVerifier(worm, store, RecordingAlerter()).run()
     assert not result.ok and "sequence gap" in (result.detail or "")
 
