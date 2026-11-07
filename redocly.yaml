@@ -1,0 +1,9 @@
+extends:
+  - recommended
+rules:
+  # False positive: Redocly's example check misreads additionalProperties: false combined with
+  # if/then and reports declared fields as "unevaluated properties". spec/check_spec.py validates
+  # every example with the reference JSON Schema validator instead.
+  no-invalid-media-type-examples: off
+  # Private API; there is no public license to declare.
+  info-license: off
