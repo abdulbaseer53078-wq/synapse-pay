@@ -1,0 +1,824 @@
+openapi: 3.1.0
+info:
+  title: Synapse Pay API
+  version: 1.0.0
+  description: >-
+    Frozen at v1.0.0. Any change to this contract goes through a versioned
+    breaking-change process (e.g. a /v2 endpoint).
+servers:
+  - url: /api
+# Merchant backends use OAuth2; terminals use mTLS. Either satisfies a request.
+security:
+  - OAuth2ClientCredentials: [transactions:write]
+  - MutualTLS: []
+webhooks:
+  transactionStatus:
+    post:
+      operationId: transactionStatusWebhook
+      summary: Final transaction status, sent to the request's webhook_url
+      description: >-
+        Signed with HMAC-SHA256 instead of OAuth/mTLS. The per-merchant secret is
+        provisioned at merchant onboarding; the merchant record's webhook_secret_id
+        (Terminal Registry) selects which secret signs. Receivers must verify the
+        signature over the raw body bytes, before parsing, using a constant-time compare.
+      security: []
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          description: Lowercase hex HMAC-SHA256 of the raw request body, keyed with the merchant's webhook secret.
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionResponse'
+      responses:
+        2XX:
+          description: Receipt acknowledged.
+paths:
+  /v1/transactions:
+    post:
+      operationId: createTransaction
+      summary: Create a transaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionRequest'
+            examples:
+              card: { $ref: '#/components/examples/CardRequest' }
+              upi: { $ref: '#/components/examples/UpiRequest' }
+              wallet: { $ref: '#/components/examples/WalletRequest' }
+              qr: { $ref: '#/components/examples/QrRequest' }
+              offline: { $ref: '#/components/examples/OfflineRequest' }
+      responses:
+        '201':
+          description: >-
+            Transaction created. A retry with the same idempotency_key returns this
+            same body without reprocessing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+              examples:
+                card_success: { $ref: '#/components/examples/CardSuccess' }
+                card_failure: { $ref: '#/components/examples/CardFailure' }
+                upi_success: { $ref: '#/components/examples/UpiSuccess' }
+                upi_failure: { $ref: '#/components/examples/UpiFailure' }
+                wallet_success: { $ref: '#/components/examples/WalletSuccess' }
+                wallet_failure: { $ref: '#/components/examples/WalletFailure' }
+                qr_success: { $ref: '#/components/examples/QrSuccess' }
+                qr_failure: { $ref: '#/components/examples/QrFailure' }
+                offline_success: { $ref: '#/components/examples/OfflineSuccess' }
+                offline_failure: { $ref: '#/components/examples/OfflineFailure' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  /v1/capabilities/{payment_method}:
+    get:
+      operationId: getCapabilities
+      summary: Get the static capability descriptor for a payment method
+      description: >-
+        Static; the merchant SDK fetches each descriptor once at startup and caches it.
+        For a QR transaction, use the descriptor of its qr_encoded_rail (UPI, CARD or
+        WALLET); the QR descriptor applies only when the rail is UNKNOWN.
+      security:
+        - OAuth2ClientCredentials: [transactions:read]
+        - MutualTLS: []
+      parameters:
+        - name: payment_method
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/TransactionRequest/properties/payment_method' }
+      responses:
+        '200':
+          description: The descriptor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapabilityDescriptor'
+              examples:
+                card: { $ref: '#/components/examples/CardCapabilities' }
+                upi: { $ref: '#/components/examples/UpiCapabilities' }
+                wallet: { $ref: '#/components/examples/WalletCapabilities' }
+                qr: { $ref: '#/components/examples/QrCapabilities' }
+                offline: { $ref: '#/components/examples/OfflineCapabilities' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    # Merchant SDK / merchant backend → cloud API.
+    OAuth2ClientCredentials:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: /v1/oauth/token
+          scopes:
+            transactions:write: Initiate and manage transactions
+            transactions:read: Read transaction status and history
+            registry:read: Read terminal registry entries
+            registry:write: Register and update terminals
+    # Terminal → cloud (T2C).
+    MutualTLS:
+      type: mutualTLS
+      description: >-
+        The terminal presents an X.509 client certificate issued at registration in the
+        Terminal Registry. The cloud validates the chain and checks the certificate's
+        terminal against the registry; a request whose terminal_id differs from the
+        certificate's terminal is rejected with 403.
+  responses:
+    Error:
+      description: >-
+        The request was rejected before a transaction was created (400 invalid body,
+        401 not authenticated, 403 missing scope or terminal_id not matching the client
+        certificate, 409 idempotency_key reused with a different body, 422 unknown
+        terminal or merchant, 5XX server error). Declines are not errors here: they
+        return 201 with status FAILED and the error inside the transaction.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid_request:
+              value:
+                error_code: INVALID_REQUEST
+                error_message: "amount: must be a positive integer"
+                error_category: VALIDATION_ERROR
+                retryable: false
+            idempotency_conflict:
+              value:
+                error_code: IDEMPOTENCY_KEY_CONFLICT
+                error_message: idempotency_key was already used with a different request body
+                error_category: VALIDATION_ERROR
+                retryable: false
+  # Fixtures for adapter developers, contract tests and SDK docs. Each response echoes its request.
+  examples:
+    CardRequest:
+      value:
+        idempotency_key: 0b8e6c1a-4f2d-4a9e-8c3b-1d2e3f4a5b6c
+        amount: 50000
+        currency: INR
+        payment_method: CARD
+        method_details:
+          encrypted_card_data: hQEMA0x7cX9Kj2Q1AQf/ZmFrZS1jaXBoZXJ0ZXh0
+          card_expiry: 08/28
+          cardholder_name: A Kumar
+          card_network: RUPAY
+        terminal_id: term_blr_001
+        merchant_id: merch_1001
+        customer_ref: cust_42
+        capture_mode: AUTO
+        description: Order 7781
+        metadata: { order_id: "7781" }
+        webhook_url: https://merchant.example.com/webhooks/pay
+    CardSuccess:
+      value:
+        transaction_id: txn_01JC8Z1K2M3N4P5Q6R7S8T9V0W
+        idempotency_key: 0b8e6c1a-4f2d-4a9e-8c3b-1d2e3f4a5b6c
+        status: CAPTURED
+        amount: 50000
+        currency: INR
+        payment_method: CARD
+        method_reference: "431298765012"
+        auth_code: "A1B2C3"
+        created_at: "2026-11-07T10:00:00Z"
+        updated_at: "2026-11-07T10:00:02Z"
+        metadata: { order_id: "7781" }
+    CardFailure:
+      value:
+        transaction_id: txn_01JC8Z1K2M3N4P5Q6R7S8T9V0X
+        idempotency_key: 0b8e6c1a-4f2d-4a9e-8c3b-1d2e3f4a5b6c
+        status: FAILED
+        amount: 50000
+        currency: INR
+        payment_method: CARD
+        method_reference: "431298765013"
+        created_at: "2026-11-07T10:00:00Z"
+        updated_at: "2026-11-07T10:00:02Z"
+        error:
+          error_code: INSUFFICIENT_FUNDS
+          error_message: The issuer declined the payment for insufficient funds
+          error_category: HARD_DECLINE
+          retryable: false
+        metadata: { order_id: "7781" }
+
+    UpiRequest:
+      value:
+        idempotency_key: 1c9f7d2b-5a3e-4b0f-9d4c-2e3f4a5b6c7d
+        amount: 25000
+        currency: INR
+        payment_method: UPI
+        method_details:
+          vpa: user@okaxis
+          flow_type: COLLECT
+        terminal_id: term_blr_001
+        merchant_id: merch_1001
+    UpiSuccess:
+      value:
+        transaction_id: txn_01JC8Z2A3B4C5D6E7F8G9H0J1K
+        idempotency_key: 1c9f7d2b-5a3e-4b0f-9d4c-2e3f4a5b6c7d
+        status: SETTLED
+        amount: 25000
+        currency: INR
+        payment_method: UPI
+        method_reference: "631245789012"
+        created_at: "2026-11-07T10:05:00Z"
+        updated_at: "2026-11-07T10:05:09Z"
+    UpiFailure:
+      value:
+        transaction_id: txn_01JC8Z2A3B4C5D6E7F8G9H0J1M
+        idempotency_key: 1c9f7d2b-5a3e-4b0f-9d4c-2e3f4a5b6c7d
+        status: FAILED
+        amount: 25000
+        currency: INR
+        payment_method: UPI
+        created_at: "2026-11-07T10:05:00Z"
+        updated_at: "2026-11-07T10:05:01Z"
+        error:
+          error_code: INVALID_VPA
+          error_message: The VPA does not exist
+          error_category: HARD_DECLINE
+          retryable: false
+
+    WalletRequest:
+      value:
+        idempotency_key: 2d0a8e3c-6b4f-4c1a-8e5d-3f4a5b6c7d8e
+        amount: 9900
+        currency: INR
+        payment_method: WALLET
+        method_details:
+          wallet_provider: PAYTM
+          wallet_token: wlt_tok_8f3k2j1h
+        terminal_id: term_del_007
+        merchant_id: merch_1002
+    WalletSuccess:
+      value:
+        transaction_id: txn_01JC8Z3B4C5D6E7F8G9H0J1K2L
+        idempotency_key: 2d0a8e3c-6b4f-4c1a-8e5d-3f4a5b6c7d8e
+        status: CAPTURED
+        amount: 9900
+        currency: INR
+        payment_method: WALLET
+        method_reference: PTM20261107100912
+        created_at: "2026-11-07T10:09:00Z"
+        updated_at: "2026-11-07T10:09:03Z"
+    WalletFailure:
+      value:
+        transaction_id: txn_01JC8Z3B4C5D6E7F8G9H0J1K2M
+        idempotency_key: 2d0a8e3c-6b4f-4c1a-8e5d-3f4a5b6c7d8e
+        status: FAILED
+        amount: 9900
+        currency: INR
+        payment_method: WALLET
+        created_at: "2026-11-07T10:09:00Z"
+        updated_at: "2026-11-07T10:09:02Z"
+        error:
+          error_code: INSUFFICIENT_FUNDS
+          error_message: Wallet balance is too low
+          error_category: HARD_DECLINE
+          retryable: false
+
+    QrRequest:
+      value:
+        idempotency_key: 3e1b9f4d-7c5a-4d2b-9f6e-4a5b6c7d8e9f
+        amount: 15000
+        currency: INR
+        payment_method: QR
+        method_details:
+          qr_data: "upi://pay?pa=merchant@okicici&pn=Store&am=150.00&cu=INR"
+          qr_standard: UPI_QR
+          qr_encoded_rail: UPI
+        terminal_id: term_mum_003
+        merchant_id: merch_1003
+    QrSuccess:
+      value:
+        transaction_id: txn_01JC8Z4C5D6E7F8G9H0J1K2L3M
+        idempotency_key: 3e1b9f4d-7c5a-4d2b-9f6e-4a5b6c7d8e9f
+        status: SETTLED
+        amount: 15000
+        currency: INR
+        payment_method: QR
+        method_reference: "631245789555"
+        created_at: "2026-11-07T10:12:00Z"
+        updated_at: "2026-11-07T10:12:06Z"
+    QrFailure:
+      value:
+        transaction_id: txn_01JC8Z4C5D6E7F8G9H0J1K2L3N
+        idempotency_key: 3e1b9f4d-7c5a-4d2b-9f6e-4a5b6c7d8e9f
+        status: FAILED
+        amount: 15000
+        currency: INR
+        payment_method: QR
+        created_at: "2026-11-07T10:12:00Z"
+        updated_at: "2026-11-07T10:12:30Z"
+        error:
+          error_code: HOST_TIMEOUT
+          error_message: The acquirer did not respond in time
+          error_category: SOFT_DECLINE
+          retryable: true
+
+    OfflineRequest:
+      value:
+        idempotency_key: 4f2c0a5e-8d6b-4e3c-8a7f-5b6c7d8e9f0a
+        amount: 20000
+        currency: INR
+        payment_method: OFFLINE
+        method_details:
+          offline_reference: OFF-term_blr_001-000123
+          offline_limits: { per_transaction: 200000, per_day: 1000000 }
+          local_fraud_score: 0.12
+        terminal_id: term_blr_001
+        merchant_id: merch_1001
+    OfflineSuccess:
+      value:
+        transaction_id: txn_01JC8Z5D6E7F8G9H0J1K2L3M4N
+        idempotency_key: 4f2c0a5e-8d6b-4e3c-8a7f-5b6c7d8e9f0a
+        status: PENDING
+        amount: 20000
+        currency: INR
+        payment_method: OFFLINE
+        created_at: "2026-11-07T10:15:00Z"
+        updated_at: "2026-11-07T10:15:00Z"
+    OfflineFailure:
+      value:
+        transaction_id: txn_01JC8Z5D6E7F8G9H0J1K2L3M4P
+        idempotency_key: 4f2c0a5e-8d6b-4e3c-8a7f-5b6c7d8e9f0a
+        status: FAILED
+        amount: 20000
+        currency: INR
+        payment_method: OFFLINE
+        created_at: "2026-11-07T10:15:00Z"
+        updated_at: "2026-11-07T11:40:00Z"
+        error:
+          error_code: INSUFFICIENT_FUNDS
+          error_message: Declined by the issuer when the offline transaction synced
+          error_category: HARD_DECLINE
+          retryable: false
+
+    CardCapabilities:
+      value:
+        payment_method: CARD
+        supports_chargeback: true
+        supports_recurring: true
+        supports_offline: true
+        supports_refund: true
+        supports_partial_refund: true
+        supports_partial_capture: true
+        settlement_timeline: T+1
+        auth_type: issuer_authorization
+        dispute_rules: { framework: CARD_SCHEME, dispute_window_days: 120, resolution_timeline_days: 45 }
+        transitions:
+          - { from: INITIATED, to: PENDING }
+          - { from: PENDING, to: AUTHORIZED }
+          - { from: PENDING, to: FAILED }
+          - { from: AUTHORIZED, to: CAPTURED }
+          - { from: AUTHORIZED, to: VOIDED }
+          - { from: CAPTURED, to: SETTLED }
+          - { from: CAPTURED, to: REFUNDED }
+          - { from: CAPTURED, to: PARTIALLY_REFUNDED }
+          - { from: SETTLED, to: REFUNDED }
+          - { from: SETTLED, to: PARTIALLY_REFUNDED }
+          - { from: PARTIALLY_REFUNDED, to: PARTIALLY_REFUNDED }
+          - { from: PARTIALLY_REFUNDED, to: REFUNDED }
+    UpiCapabilities:
+      description: >-
+        The dispute_rules day counts are illustrative placeholders; confirm them against
+        current NPCI circulars before the backend serves this descriptor.
+      value:
+        payment_method: UPI
+        supports_chargeback: false
+        supports_recurring: true
+        supports_offline: false
+        supports_refund: true
+        supports_partial_refund: true
+        supports_partial_capture: false
+        settlement_timeline: instant
+        auth_type: vpa_collect
+        dispute_rules: { framework: NPCI_UPI, dispute_window_days: 30, resolution_timeline_days: 30 }
+        transitions:
+          - { from: INITIATED, to: PENDING }
+          - { from: PENDING, to: SETTLED }
+          - { from: PENDING, to: FAILED }
+          - { from: SETTLED, to: REFUNDED }
+          - { from: SETTLED, to: PARTIALLY_REFUNDED }
+          - { from: PARTIALLY_REFUNDED, to: PARTIALLY_REFUNDED }
+          - { from: PARTIALLY_REFUNDED, to: REFUNDED }
+    WalletCapabilities:
+      value:
+        payment_method: WALLET
+        supports_chargeback: false
+        supports_recurring: false
+        supports_offline: false
+        supports_refund: true
+        supports_partial_refund: false
+        supports_partial_capture: false
+        settlement_timeline: T+0
+        auth_type: otp
+        dispute_rules: { framework: NONE, dispute_window_days: 0 }
+        transitions:
+          - { from: INITIATED, to: PENDING }
+          - { from: PENDING, to: AUTHORIZED }
+          - { from: PENDING, to: FAILED }
+          - { from: AUTHORIZED, to: CAPTURED }
+          - { from: CAPTURED, to: SETTLED }
+          - { from: CAPTURED, to: REFUNDED }
+          - { from: SETTLED, to: REFUNDED }
+    QrCapabilities:
+      description: >-
+        Fallback used only when qr_encoded_rail is UNKNOWN. QR transactions on a known
+        rail use that rail's descriptor (UPI, CARD or WALLET).
+      value:
+        payment_method: QR
+        supports_chargeback: false
+        supports_recurring: false
+        supports_offline: false
+        supports_refund: false
+        supports_partial_refund: false
+        supports_partial_capture: false
+        settlement_timeline: unknown
+        auth_type: unknown
+        dispute_rules: { framework: NONE, dispute_window_days: 0 }
+        transitions:
+          - { from: INITIATED, to: PENDING }
+          - { from: PENDING, to: SETTLED }
+          - { from: PENDING, to: FAILED }
+    OfflineCapabilities:
+      value:
+        payment_method: OFFLINE
+        supports_chargeback: false
+        supports_recurring: false
+        supports_offline: true
+        supports_refund: false
+        supports_partial_refund: false
+        supports_partial_capture: false
+        settlement_timeline: T+1_on_sync
+        auth_type: local_fraud_screening
+        dispute_rules: { framework: NONE, dispute_window_days: 0 }
+        transitions:
+          - { from: INITIATED, to: PENDING }
+          - { from: PENDING, to: AUTHORIZED }
+          - { from: PENDING, to: FAILED }
+          - { from: AUTHORIZED, to: SETTLED }
+  schemas:
+    TransactionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - idempotency_key
+        - amount
+        - currency
+        - payment_method
+        - method_details
+        - terminal_id
+        - merchant_id
+      properties:
+        idempotency_key:
+          type: string
+          format: uuid
+          description: >-
+            Client-generated. If the same key is sent twice, the server returns
+            the original response without reprocessing. Critical for payment retries.
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >-
+            Smallest currency unit (paise for INR). 50000 = ₹500.00. Never use floats.
+          examples: [50000]
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: ISO 4217 currency code.
+          examples: [INR]
+        payment_method:
+          type: string
+          enum: [CARD, UPI, WALLET, QR, OFFLINE]
+        method_details:
+          type: object
+          description: Discriminated by payment_method; the variant is chosen by the rules in allOf below.
+        terminal_id:
+          type: string
+          minLength: 1
+          description: Must exist in the Terminal Registry (checked server-side).
+        merchant_id:
+          type: string
+          minLength: 1
+          description: The merchant on whose behalf the payment is processed.
+        customer_ref:
+          type: string
+          description: Optional merchant-side customer identifier.
+        capture_mode:
+          type: string
+          enum: [AUTO, MANUAL]
+          default: AUTO
+        description:
+          type: string
+          description: Human-readable description.
+        metadata:
+          type: object
+          description: Free-form key-value pairs for the merchant.
+          additionalProperties:
+            type: string
+        webhook_url:
+          type: string
+          format: uri
+          pattern: '^https://'
+          description: Where to send the final status notification. HTTPS only.
+      # The discriminator (payment_method) sits beside method_details, not inside it,
+      # so OpenAPI's `discriminator` keyword can't be used; JSON Schema if/then does the job.
+      allOf:
+        - if: { properties: { payment_method: { const: CARD } } }
+          then: { properties: { method_details: { $ref: '#/components/schemas/CardDetails' } } }
+        - if: { properties: { payment_method: { const: UPI } } }
+          then: { properties: { method_details: { $ref: '#/components/schemas/UpiDetails' } } }
+        - if: { properties: { payment_method: { const: WALLET } } }
+          then: { properties: { method_details: { $ref: '#/components/schemas/WalletDetails' } } }
+        - if: { properties: { payment_method: { const: QR } } }
+          then: { properties: { method_details: { $ref: '#/components/schemas/QrDetails' } } }
+        - if: { properties: { payment_method: { const: OFFLINE } } }
+          then: { properties: { method_details: { $ref: '#/components/schemas/OfflineDetails' } } }
+
+    TransactionResponse:
+      type: object
+      required:
+        - transaction_id
+        - idempotency_key
+        - status
+        - amount
+        - currency
+        - payment_method
+        - created_at
+        - updated_at
+      properties:
+        transaction_id:
+          type: string
+          description: Server-generated unique ID.
+        # Echoed fields reuse the request definitions so the two can't drift apart.
+        idempotency_key: { $ref: '#/components/schemas/TransactionRequest/properties/idempotency_key' }
+        status: { $ref: '#/components/schemas/TransactionStatus' }
+        amount: { $ref: '#/components/schemas/TransactionRequest/properties/amount' }
+        currency: { $ref: '#/components/schemas/TransactionRequest/properties/currency' }
+        payment_method: { $ref: '#/components/schemas/TransactionRequest/properties/payment_method' }
+        method_reference:
+          type: string
+          description: The host's transaction ID, UPI txn ID, or wallet reference. Absent until the host responds.
+        auth_code:
+          type: string
+          description: Authorization code from the issuer, if applicable.
+        created_at:
+          type: string
+          format: date-time
+          description: When the transaction was initiated.
+        updated_at:
+          type: string
+          format: date-time
+          description: When the status last changed.
+        error:
+          $ref: '#/components/schemas/Error'
+          description: Only present if status is FAILED.
+        metadata: { $ref: '#/components/schemas/TransactionRequest/properties/metadata' }
+      if: { properties: { status: { const: FAILED } } }
+      then: { required: [error] }
+      else: { not: { required: [error] } }
+
+    TransactionStatus:
+      type: string
+      enum:
+        - INITIATED
+        - PENDING
+        - AUTHORIZED
+        - CAPTURED
+        - SETTLED
+        - VOIDED
+        - FAILED
+        - REFUNDED
+        - PARTIALLY_REFUNDED
+      description: |
+        Transaction lifecycle. Allowed transitions:
+
+        - INITIATED → PENDING
+        - PENDING → AUTHORIZED | FAILED
+        - AUTHORIZED → CAPTURED | VOIDED (void only before capture)
+        - CAPTURED → SETTLED | REFUNDED (full) | PARTIALLY_REFUNDED
+        - SETTLED → REFUNDED (full) | PARTIALLY_REFUNDED
+        - PARTIALLY_REFUNDED → PARTIALLY_REFUNDED (another partial refund) | REFUNDED (remainder)
+
+        Methods may skip states:
+
+        - CARD: all states.
+        - UPI: INITIATED → PENDING → SETTLED (no separate capture).
+        - OFFLINE: INITIATED → PENDING (queued) → AUTHORIZED → SETTLED on sync.
+
+        The capability descriptor (Task 1.6) lists the transitions each method supports.
+
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error_code, error_message, error_category, retryable]
+      properties:
+        error_code:
+          type: string
+          enum:
+            - INSUFFICIENT_FUNDS
+            - INVALID_VPA
+            - HOST_TIMEOUT
+            - INVALID_REQUEST
+            - UNAUTHENTICATED
+            - FORBIDDEN
+            - IDEMPOTENCY_KEY_CONFLICT
+            - TERMINAL_NOT_FOUND
+            - MERCHANT_NOT_FOUND
+            - INTERNAL_ERROR
+          description: Machine-readable code.
+        error_message:
+          type: string
+          description: Human-readable description. Must never contain card data, tokens or other PII.
+        error_category:
+          type: string
+          enum: [SOFT_DECLINE, HARD_DECLINE, SYSTEM_ERROR, VALIDATION_ERROR, AUTHENTICATION_ERROR]
+          description: >-
+            Drives the Cascade Engine: SOFT_DECLINE cascades to another acquirer,
+            HARD_DECLINE stops immediately.
+        retryable:
+          type: boolean
+          description: >-
+            Whether the client should retry with the same idempotency_key. When true, the
+            server must not store this response as the key's final result, or the retry
+            would just replay the failure.
+
+    CapabilityDescriptor:
+      type: object
+      description: >-
+        What a payment method supports. Downstream services (e.g. Dispute Management)
+        branch on these values instead of hardcoding per-method logic.
+      additionalProperties: false
+      required:
+        - payment_method
+        - supports_chargeback
+        - supports_recurring
+        - supports_offline
+        - supports_refund
+        - supports_partial_refund
+        - supports_partial_capture
+        - settlement_timeline
+        - auth_type
+        - dispute_rules
+        - transitions
+      properties:
+        payment_method: { $ref: '#/components/schemas/TransactionRequest/properties/payment_method' }
+        supports_chargeback: { type: boolean }
+        supports_recurring: { type: boolean }
+        supports_offline: { type: boolean }
+        supports_refund: { type: boolean }
+        supports_partial_refund: { type: boolean }
+        supports_partial_capture: { type: boolean }
+        settlement_timeline:
+          type: string
+          examples: [instant]
+        auth_type:
+          type: string
+          examples: [vpa_collect]
+        dispute_rules:
+          type: object
+          additionalProperties: false
+          required: [framework, dispute_window_days]
+          properties:
+            framework:
+              type: string
+              enum: [CARD_SCHEME, NPCI_UPI, NONE]
+              description: >-
+                Which dispute framework governs this method. CARD_SCHEME: Visa/Mastercard/RuPay
+                chargeback rules. NPCI_UPI: NPCI's UPI dispute and grievance framework.
+                NONE: no formal dispute mechanism (e.g. OFFLINE in v1).
+            dispute_window_days:
+              type: integer
+              minimum: 0
+              description: Days from settlement within which a dispute can be raised.
+            resolution_timeline_days:
+              type: integer
+              minimum: 0
+              description: Maximum days for resolution under the framework.
+        transitions:
+          type: array
+          description: The state transitions (Task 1.4) this method can make.
+          items:
+            type: object
+            additionalProperties: false
+            required: [from, to]
+            properties:
+              from: { $ref: '#/components/schemas/TransactionStatus' }
+              to: { $ref: '#/components/schemas/TransactionStatus' }
+
+    CardDetails:
+      type: object
+      additionalProperties: false
+      required: [encrypted_card_data, card_expiry, card_network]
+      properties:
+        encrypted_card_data:
+          type: string
+          minLength: 1
+          description: Encrypted with the terminal's public key. Never a raw PAN.
+        card_expiry:
+          type: string
+          pattern: '^(0[1-9]|1[0-2])/[0-9]{2}$'
+          description: MM/YY.
+          examples: [08/28]
+        cardholder_name:
+          type: string
+          description: PII; must never be logged.
+        card_network:
+          type: string
+          enum: [VISA, MASTERCARD, RUPAY, AMEX]
+
+    UpiDetails:
+      type: object
+      additionalProperties: false
+      description: Payee identified by VPA (typed, picked from contacts or deep-linked). A scanned QR is payment_method QR.
+      required: [vpa, flow_type]
+      properties:
+        vpa:
+          type: string
+          pattern: '^[A-Za-z0-9._-]+@[A-Za-z0-9]+$'
+          examples: [user@okaxis]
+        flow_type:
+          type: string
+          enum: [COLLECT, INTENT, MANDATE]
+        mandate_details:
+          type: object
+          description: Only allowed, and required, when flow_type is MANDATE. Fields not yet specified.
+      if: { properties: { flow_type: { const: MANDATE } } }
+      then: { required: [mandate_details] }
+      else: { not: { required: [mandate_details] } }
+
+    WalletDetails:
+      type: object
+      additionalProperties: false
+      required: [wallet_provider, wallet_token]
+      properties:
+        wallet_provider:
+          type: string
+          enum: [PAYTM, PHONEPE, AMAZON_PAY]
+        wallet_token:
+          type: string
+          minLength: 1
+          description: The wallet's opaque reference.
+
+    QrDetails:
+      type: object
+      additionalProperties: false
+      description: >-
+        Payee identified by a scanned QR. The transaction is recorded as QR, but the QR
+        adapter dispatches to the adapter of qr_encoded_rail (e.g. a UPI rail runs the
+        UPI adapter's core logic), and that rail's capability descriptor and dispute
+        rules apply. The QR descriptor applies only when the rail is UNKNOWN.
+      required: [qr_data, qr_standard, qr_encoded_rail]
+      properties:
+        qr_data:
+          type: string
+          minLength: 1
+          description: Raw QR payload as scanned.
+        qr_standard:
+          type: string
+          enum: [UPI_QR, BHARAT_QR_STATIC, BHARAT_QR_DYNAMIC, PROPRIETARY_QR]
+          description: The QR specification the payload conforms to.
+        qr_encoded_rail:
+          type: string
+          enum: [UPI, CARD_SCHEME, WALLET, UNKNOWN]
+          description: >-
+            The payment rail the QR resolves to; downstream routing and capability logic
+            read this. Client-supplied, so the server must check it against qr_data.
+
+    OfflineDetails:
+      type: object
+      additionalProperties: false
+      required: [offline_reference, offline_limits, local_fraud_score]
+      properties:
+        offline_reference:
+          type: string
+          minLength: 1
+          description: Locally generated reference.
+        offline_limits:
+          type: object
+          additionalProperties: false
+          required: [per_transaction, per_day]
+          description: >-
+            Limits enforced at the edge, in the smallest currency unit. Informational only:
+            the server must re-check against limits it holds, never trust these values.
+          properties:
+            per_transaction: { type: integer, format: int64, minimum: 0 }
+            per_day: { type: integer, format: int64, minimum: 0 }
+        local_fraud_score:
+          type: number
+          description: >-
+            Score computed by the edge fraud engine. Client-supplied, so it is a signal only;
+            the server must not use it to skip its own risk checks.
