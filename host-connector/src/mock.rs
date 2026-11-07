@@ -51,6 +51,7 @@ impl MockHostConnector {
             decision: Decision::Approved { authorization_code: "MOCK01".into() },
             response_code: "00".into(),
             host_reference: None,
+            host_used: String::new(),
         }
     }
 }
