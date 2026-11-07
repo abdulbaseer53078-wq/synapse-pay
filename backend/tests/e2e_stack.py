@@ -108,7 +108,8 @@ def acquirer(tmp_path_factory, card_service_binary):
     d = tmp_path_factory.mktemp("acquirer")
     _acquirer_pki(d)
     dialect = ROOT / "iso8583" / "dialects" / "synthetic-host.json"
-    mock = Process([os.environ.get("PYTHON", "python3"), str(ROOT / "host-connector" / "mock_host" / "mock_host.py"),
+    mock = Process([os.environ.get("PYTHON", sys.executable),
+                    str(ROOT / "host-connector" / "mock_host" / "mock_host.py"),
                     "--dialect", str(dialect), "--cert", str(d / "host.pem"), "--key", str(d / "host-key.pem"),
                     "--client-ca", str(d / "ca.pem"), "--sleep", "5"])
     host_port = mock.wait_listening(10)
