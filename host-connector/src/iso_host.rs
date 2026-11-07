@@ -11,9 +11,13 @@
 //! message isn't sent. A response that misses its deadline kills the connection: after a cut cable or a
 //! hung host the socket can't be trusted, and a late reply must never be taken for a newer request's.
 //!
-//! shortcut: no reversals (0400) yet: they come with the timeout/reversal task.
+//! Reversals (0400) quote the original request in DE 90 (original MTI, STAN and DE 7). The connector remembers
+//! the most recent originals it sent (see [`Originals`]), shared by all of a host's connections.
+//!
+//! shortcut: originals live in memory only; a restart between a timeout and its reversal loses them. Persist
+//! them (or the reversal queue) when reversals move to a background job.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -56,6 +60,44 @@ impl IsoHostConfig {
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<u8>>>>>;
 
+/// What a reversal needs to quote about the request it undoes (DE 90).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Original {
+    mti: String,
+    stan: String,
+    transmitted: String, // DE 7, MMDDhhmmss
+}
+
+/// The most recent requests sent to one host, by transaction_id, so a reversal can find its original.
+#[derive(Default)]
+pub struct OriginalsInner {
+    by_id: HashMap<String, Original>,
+    order: VecDeque<String>,
+}
+
+/// Shared by every connection to one host (a reversal may leave on a different connection than its original).
+pub type Originals = Arc<Mutex<OriginalsInner>>;
+
+/// How many originals to remember. Reversals follow within seconds, so this only needs to cover a burst.
+const ORIGINALS_KEPT: usize = 10_000;
+
+impl OriginalsInner {
+    fn remember(&mut self, transaction_id: &str, original: Original) {
+        if self.by_id.insert(transaction_id.to_owned(), original).is_none() {
+            self.order.push_back(transaction_id.to_owned());
+        }
+        while self.order.len() > ORIGINALS_KEPT {
+            if let Some(old) = self.order.pop_front() {
+                self.by_id.remove(&old);
+            }
+        }
+    }
+
+    fn get(&self, transaction_id: &str) -> Option<Original> {
+        self.by_id.get(transaction_id).cloned()
+    }
+}
+
 /// Removes a request's waiter however `send_transaction` ends, including when its future is dropped.
 struct Waiting<'a> {
     pending: &'a Pending,
@@ -73,22 +115,23 @@ pub struct IsoHostConnector {
     config: Arc<IsoHostConfig>,
     pending: Pending,
     stan: Arc<AtomicU32>,
+    originals: Originals,
     reader: JoinHandle<()>,
 }
 
 impl IsoHostConnector {
     /// Takes over the link's event stream. Must be called inside a Tokio runtime.
     pub fn new(link: Link, events: mpsc::Receiver<LinkEvent>, config: impl Into<Arc<IsoHostConfig>>) -> Self {
-        Self::with_stans(link, events, config.into(), Arc::default())
+        Self::with_stans(link, events, config.into(), Arc::default(), Originals::default())
     }
 
     /// Like `new`, drawing STANs from a counter shared with the host's other connections, so no two
     /// in-flight requests to one host ever carry the same STAN.
     pub(crate) fn with_stans(link: Link, events: mpsc::Receiver<LinkEvent>, config: Arc<IsoHostConfig>,
-                             stan: Arc<AtomicU32>) -> Self {
+                             stan: Arc<AtomicU32>, originals: Originals) -> Self {
         let pending = Pending::default();
         let reader = tokio::spawn(read_responses(events, config.clone(), pending.clone()));
-        Self { link, config, pending, stan, reader }
+        Self { link, config, pending, stan, originals, reader }
     }
 
     pub fn link(&self) -> &Link {
@@ -164,8 +207,24 @@ impl HostConnector for IsoHostConnector {
                 return Err(HostError::Unavailable("deadline passed before sending".into()));
             }
             let stan = self.next_stan();
-            let (mti, wire) = build_request(txn, &stan, SystemTime::now(), &self.config)
-                .map_err(HostError::Unavailable)?;
+            let original = match &txn.kind {
+                TransactionKind::Reversal { original_transaction_id } => Some(
+                    self.originals.lock().unwrap().get(original_transaction_id).ok_or_else(|| {
+                        HostError::Unavailable("no record of the original request to reverse".into())
+                    })?,
+                ),
+                _ => None,
+            };
+            let (mti, transmitted, wire) =
+                build_request(txn, &stan, SystemTime::now(), &self.config, original.as_ref())
+                    .map_err(HostError::Unavailable)?;
+            if original.is_none() {
+                // Remembered before sending: the reversal for a timeout must find it.
+                self.originals.lock().unwrap().remember(
+                    &txn.transaction_id,
+                    Original { mti: mti.clone(), stan: stan.clone(), transmitted },
+                );
+            }
             let raw = self.exchange(ctx, &txn.transaction_id, stan, &wire).await?;
             parse_response(&raw, &mti, &self.config)
         })
@@ -238,12 +297,13 @@ fn deliver(frame: Vec<u8>, config: &IsoHostConfig, pending: &Pending) {
 
 /// Maps a transaction onto the dialect's data elements and packs it. Fields the dialect doesn't define are
 /// skipped; the dialect's `required` rules still apply. Errors never include field values.
-fn build_request(txn: &Transaction, stan: &str, now: SystemTime, config: &IsoHostConfig)
-    -> Result<(String, Vec<u8>), String> {
+/// Returns the MTI, the DE 7 sent, and the packed message. `original` is required for a reversal.
+fn build_request(txn: &Transaction, stan: &str, now: SystemTime, config: &IsoHostConfig,
+                 original: Option<&Original>) -> Result<(String, String, Vec<u8>), String> {
     let mti = match txn.kind {
         TransactionKind::Authorization => "0100",
         TransactionKind::Purchase => "0200",
-        TransactionKind::Reversal { .. } => return Err("reversals are not implemented yet".into()),
+        TransactionKind::Reversal { .. } => "0400",
     };
     let currency = numeric_currency(&txn.currency).ok_or_else(|| format!("unsupported currency {}", txn.currency))?;
     let amount = format!("{:012}", txn.amount_minor);
@@ -251,11 +311,18 @@ fn build_request(txn: &Transaction, stan: &str, now: SystemTime, config: &IsoHos
         return Err("amount doesn't fit DE 4".into());
     }
     let t = Utc::from(now);
+    let transmitted = format!("{:02}{:02}{:02}{:02}{:02}", t.month, t.day, t.hour, t.minute, t.second);
+    // DE 90: original MTI, STAN and DE 7, then acquiring and forwarding institution IDs (zero: not assigned).
+    let original_data = match (&txn.kind, original) {
+        (TransactionKind::Reversal { .. }, Some(o)) => Some(format!("{}{}{}{:011}{:011}", o.mti, o.stan, o.transmitted, 0, 0)),
+        (TransactionKind::Reversal { .. }, None) => return Err("a reversal needs its original request".into()),
+        _ => None,
+    };
     let fields = [
         (2, txn.card.pan.clone()),
         (3, "000000".into()), // purchase of goods and services
         (4, amount),
-        (7, format!("{:02}{:02}{:02}{:02}{:02}", t.month, t.day, t.hour, t.minute, t.second)),
+        (7, transmitted.clone()),
         (11, stan.into()),
         (12, format!("{:02}{:02}{:02}", t.hour, t.minute, t.second)), // shortcut: UTC as local time
         (13, format!("{:02}{:02}", t.month, t.day)),
@@ -268,13 +335,13 @@ fn build_request(txn: &Transaction, stan: &str, now: SystemTime, config: &IsoHos
         (49, currency.into()),
     ];
     let mut msg = Iso8583Message::new(mti).expect("fixed MTI");
-    for (field, value) in fields {
+    for (field, value) in fields.into_iter().chain(original_data.map(|v| (90, v))) {
         if config.dictionary.spec(field).is_some() {
             msg.set(field, value.into_bytes()).map_err(|e| e.to_string())?;
         }
     }
     let wire = pack(&msg, &config.dictionary).map_err(|e| format!("can't build {mti}: {e}"))?;
-    Ok((mti.into(), wire))
+    Ok((mti.into(), transmitted, wire))
 }
 
 fn build_echo(stan: &str, now: SystemTime, config: &IsoHostConfig) -> Result<Vec<u8>, String> {
