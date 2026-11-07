@@ -6,3 +6,4 @@ target/
 *.key
 *-key.pem
 graphify-out/
+.sandbox/
