@@ -1,0 +1,19 @@
+name: synapsepay_flutter
+description: Synapse Pay for Flutter apps. Card payments through the native Synapse Pay SDK's payment sheet.
+version: 0.1.0
+publish_to: none  # remove to publish on pub.dev
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.synapsepay.flutter
+        pluginClass: SynapsePayFlutterPlugin
