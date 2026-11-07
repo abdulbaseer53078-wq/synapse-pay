@@ -77,6 +77,27 @@ def test_the_decision_carries_the_reason_for_the_audit_log():
     assert engine.route("merch_1", "UPI", 100).to_dict()["reason"] == "UPI default rule; psp_a is UP"
 
 
+def test_the_decision_carries_every_usable_host_in_preference_order():
+    """The cascade needs the shortlist, not just the winner: a soft decline on the first host must reach the
+    backup, and a DOWN host must not waste a hop on the way."""
+    engine = _engine([RoutingRule("CARD", ("dead", "slow", "fast"))],
+                     [_host("dead", 100, "CARD", failures=5), _host("slow", 4000, "CARD"),
+                      _host("fast", 100, "CARD")])
+
+    decision = engine.route("merch_1", "CARD", 100_000)
+
+    assert decision.host_id == "fast"
+    assert decision.candidates == ("fast", "slow")  # UP first, then the DEGRADED backup; DOWN dropped
+
+
+def test_global_rules_apply_to_a_merchant_with_no_rules_of_its_own():
+    """Operators can set a fleet-wide preference before per-merchant rules exist; "*" is that default."""
+    engine = RoutingEngine(InMemoryRules({"*": [RoutingRule("CARD", ("acquirer_a",))]}),
+                           HealthRegistry([_host("acquirer_a", 100, "CARD")]))
+
+    assert engine.route("merch_unknown", "CARD", 100).host_id == "acquirer_a"
+
+
 # --- cascade --------------------------------------------------------------------------------------------
 
 def _soft(host):
@@ -99,6 +120,9 @@ def test_a_transient_failure_cascades_to_the_backup():
     assert result.status == "AUTHORIZED" and result.method_reference == "ref_psp_b"
     assert [step["host"] for step in trail] == ["psp_a", "psp_b"]
     assert trail[0]["retryable"] is True and trail[1]["retryable"] is False
+    # Both facts the audit needs: who was asked, and why the attempt did not settle it.
+    assert trail[0]["asked"] == "psp_a" and trail[0]["error_category"] == "SOFT_DECLINE"
+    assert trail[1]["asked"] == "psp_b" and trail[1]["error_category"] is None
 
 
 def test_a_hard_decline_does_not_cascade():

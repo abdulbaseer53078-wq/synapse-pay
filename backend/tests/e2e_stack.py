@@ -3,6 +3,7 @@ service binary (built with cargo). Its fixtures are registered in conftest.py.""
 import os
 import shutil
 import subprocess
+import sys
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -99,7 +100,9 @@ def card_service_binary():
     build = subprocess.run(["cargo", "build", "--quiet", "--bin", "card_service"], cwd=ROOT / "card-service",
                            capture_output=True, text=True, timeout=900)
     assert build.returncode == 0, build.stderr
-    return ROOT / "card-service" / "target" / "debug" / "card_service"
+    # cargo honours CARGO_TARGET_DIR (relative to card-service/), so the binary is wherever it says.
+    target = ROOT / "card-service" / os.environ.get("CARGO_TARGET_DIR", "target")
+    return target / "debug" / "card_service"
 
 
 @pytest.fixture(scope="session")
@@ -123,3 +126,36 @@ def acquirer(tmp_path_factory, card_service_binary):
     yield f"http://{addr}", mock, service, audit
     service.stop()
     mock.stop()
+
+
+@pytest.fixture(scope="session")
+def multi_acquirer(tmp_path_factory, card_service_binary):
+    """Two real acquirers behind one card service, and they disagree about amount 5300.
+
+    psp_1 answers DE 39 "91" (issuer unavailable, a soft decline) and psp_2 approves it. The card service runs
+    in fleet mode from `HOSTS`, which is also the only place the per-host address mapping is exercised end to
+    end. Yields a dict: `url`, `mock_a`, `mock_b`, `service` and `audit`.
+    """
+    d = tmp_path_factory.mktemp("acquirers")
+    _acquirer_pki(d)
+    dialect = ROOT / "iso8583" / "dialects" / "synthetic-host.json"
+    common = [os.environ.get("PYTHON", sys.executable),
+              str(ROOT / "host-connector" / "mock_host" / "mock_host.py"),
+              "--dialect", str(dialect), "--cert", str(d / "host.pem"), "--key", str(d / "host-key.pem"),
+              "--client-ca", str(d / "ca.pem"), "--sleep", "5"]
+    mock_a = Process([*common, "--soft-decline-amount", "5300"])
+    port_a = mock_a.wait_listening(10)
+    mock_b = Process(common)
+    port_b = mock_b.wait_listening(10)
+    audit = d / "iso-audit.jsonl"
+    env = {**os.environ, "SIM_HSM_BDK_HEX": TEST_BDK_HEX, "HOSTS": "psp_1,psp_2",
+           "PSP_1_ADDR": f"127.0.0.1:{port_a}", "PSP_2_ADDR": f"127.0.0.1:{port_b}",
+           "HOST_SERVER_NAME": "localhost", "HOST_CA": str(d / "ca.pem"), "HOST_CLIENT_CERT": str(d / "client.pem"),
+           "HOST_CLIENT_KEY": str(d / "client-key.pem"), "HOST_DIALECT": str(dialect), "HOST_POOL_SIZE": "2",
+           "HOST_TIMEOUT_MS": "1500", "AUDIT_LOG_PATH": str(audit), "CARD_SERVICE_ADDR": "127.0.0.1:0"}
+    service = Process([str(card_service_binary)], env=env)
+    addr = service.wait_listening(30)
+    yield {"url": f"http://{addr}", "mock_a": mock_a, "mock_b": mock_b, "service": service, "audit": audit}
+    service.stop()
+    mock_a.stop()
+    mock_b.stop()

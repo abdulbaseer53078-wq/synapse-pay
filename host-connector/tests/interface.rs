@@ -45,6 +45,7 @@ fn mock_answers_in_script_order_then_approves() {
         decision: Decision::Declined { category: DeclineCategory::Soft },
         response_code: "91".into(), // issuer unavailable
         host_reference: Some("531110000001".into()),
+        host_used: String::new(),
     };
     mock.respond_with(Ok(soft.clone())).respond_with(Err(HostError::Unavailable("connection refused".into())));
 

@@ -33,6 +33,10 @@ pub struct CardRequest {
     pub card_expiry: String,
     #[serde(default)]
     pub pin_block: Option<String>,
+    /// The acquirers this transaction may use, in preference order (the routing engine's shortlist). Empty means
+    /// whatever the connector is configured with, which is what a single-host caller and the tests want.
+    #[serde(default)]
+    pub host_hint: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -52,6 +56,10 @@ pub struct CardResult {
     pub reversal: Reversal,
     pub card_bin: String,
     pub card_last4: String,
+    /// Which host answered, when the caller offered a choice. The audit trail must record this, not the host we
+    /// asked for first: those differ whenever the fleet failed over. None when no host answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_used: Option<String>,
 }
 
 /// Online (card-not-present) payments in India need the issuer to authenticate the cardholder (RBI's
@@ -174,8 +182,14 @@ impl CardFlow {
             terminal_id: req.acquirer_terminal_id.clone(),
             card: Card { pan: pan.as_str().to_owned(), expiry },
         };
-        let ctx = RequestContext::with_timeout(self.timeouts.host, &req.transaction_id);
+        let mut ctx = RequestContext::with_timeout(self.timeouts.host, &req.transaction_id);
+        ctx.host_hint = req.host_hint.clone();
         let result = self.host.send_transaction(&ctx, &txn).await;
+        // Capture the winner before `outcome` borrows the result: on failure no host answered, so there is none.
+        let host_used = match &result {
+            Ok(response) if !response.host_used.is_empty() => Some(response.host_used.clone()),
+            _ => None,
+        };
         let mut outcome = outcome(&txn.kind, &result);
         let mut reversal = Reversal::NotNeeded;
         if outcome.status == Status::Pending {
@@ -199,7 +213,7 @@ impl CardFlow {
         // `txn.card` holds a copy of the PAN: wipe it before returning.
         let mut txn = txn;
         zeroize::Zeroize::zeroize(&mut txn.card.pan);
-        Ok(CardResult { outcome, reversal, card_bin, card_last4 })
+        Ok(CardResult { outcome, reversal, card_bin, card_last4, host_used })
     }
 
     /// Sends the reversal until the host confirms it or attempts run out. A decline of a reversal (e.g.
@@ -215,7 +229,11 @@ impl CardFlow {
             if attempt > 0 {
                 tokio::time::sleep(self.timeouts.reversal_backoff).await;
             }
-            let ctx = RequestContext::with_timeout(self.timeouts.reversal, &reversal.transaction_id);
+            let mut ctx = RequestContext::with_timeout(self.timeouts.reversal, &reversal.transaction_id);
+            // Deliberately empty. The purchase timed out, so the fleet never reported which host answered; the
+            // only reversal that means anything is on the host holding the original, and the fleet must try the
+            // hosts rather than have this layer pick one it cannot know.
+            ctx.host_hint = vec![];
             match self.host.send_transaction(&ctx, &reversal).await {
                 Ok(resp) => {
                     if matches!(resp.decision, Decision::Approved { .. }) {

@@ -1,12 +1,15 @@
 //! The card flow against the scripted in-memory host: approvals, declines, timeouts and reversals.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use card_service::fleet::Fleet;
 use card_service::flow::{CardFlow, CardRequest, FlowError, Kind, Reversal, Timeouts};
 use card_service::hsm::{format0_pin_block, SimHsm};
+use card_service::http::AppState;
 use host_connector::mock::MockHostConnector;
 use host_connector::unified::Status;
 use host_connector::{Decision, DeclineCategory, HostError, HostResponse, TransactionKind};
@@ -31,6 +34,7 @@ fn request(amount: u64) -> CardRequest {
         encrypted_card_data: hsm().seal([1; 10], [2; 12], "data", PAN.as_bytes()),
         card_expiry: "08/28".into(),
         pin_block: None,
+        host_hint: Vec::new(),
     }
 }
 
@@ -40,7 +44,8 @@ fn flow(host: Arc<MockHostConnector>) -> CardFlow {
 }
 
 fn declined(code: &str, category: DeclineCategory) -> Result<HostResponse, HostError> {
-    Ok(HostResponse { decision: Decision::Declined { category }, response_code: code.into(), host_reference: None })
+    Ok(HostResponse { decision: Decision::Declined { category }, response_code: code.into(), host_reference: None,
+                      host_used: String::new() })
 }
 
 #[tokio::test]
@@ -160,7 +165,11 @@ fn three_ds_outcome_comes_from_the_test_card() {
 #[tokio::test]
 async fn http_api() {
     let host = Arc::new(MockHostConnector::new());
-    let app = card_service::http::router(Arc::new(flow(host)));
+    // No pools: the mock answers the transaction, and the fleet-health route reports an empty fleet.
+    let app = card_service::http::app(Arc::new(AppState {
+        flow: flow(host),
+        fleet: Arc::new(Fleet::new(HashMap::new())),
+    }));
     let body = serde_json::json!({
         "transaction_id": "txn_http", "kind": "PURCHASE", "amount": 50000, "currency": "INR",
         "acquirer_terminal_id": "TERM0001", "acquirer_merchant_id": "MERCHANT0000001",

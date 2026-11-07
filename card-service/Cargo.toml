@@ -24,3 +24,6 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+rcgen = "0.13"
+tokio = { version = "1", features = ["io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
