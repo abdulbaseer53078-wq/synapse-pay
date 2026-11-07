@@ -10,9 +10,15 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.application.registration import InvalidInput, Unauthenticated
+from app.application.transaction_sync import OfflineSyncService
 from app.application.transactions import TransactionService
 
 router = APIRouter(prefix="/api/v1/transactions", tags=["transactions"])
+
+# A terminal offline for hours can generate hundreds of sales; 100 keeps one request short enough that its
+# response arrives before the link drops again, and a retry is cheap.
+MAX_SYNC_ITEMS = 100
 
 
 class _Body(BaseModel):
@@ -34,6 +40,33 @@ class TransactionBody(_Body):
     metadata: dict[str, str] | None = None
     webhook_url: str | None = Field(default=None, pattern=r"^https://", max_length=2048)
     payment_intent_id: str | None = Field(default=None, pattern=r"^pi_[0-9a-f]{32}$")  # since 1.3.0
+
+
+@router.post("/sync", status_code=200)
+def sync_offline(body: dict, request: Request,
+                 x_terminal_id: str | None = Header(default=None)) -> JSONResponse:
+    """Batch upload of sales a terminal accepted while offline (spec: syncOfflineTransactions).
+
+    The terminal's certificate is the authentication (the gateway verified it); each item's own signature is
+    what proves the amount was not edited in the local queue. Nothing here is trusted before that check.
+    """
+    caller = None
+    if x_terminal_id is not None:
+        try:
+            caller = UUID(x_terminal_id)
+        except ValueError:
+            caller = None
+    if caller is None:
+        raise Unauthenticated("offline sync requires a terminal's client certificate (mTLS)")
+
+    items = body.get("transactions")
+    if not isinstance(items, list) or not items:
+        raise InvalidInput("transactions must be a non-empty array")
+    if len(items) > MAX_SYNC_ITEMS:
+        raise InvalidInput(f"a batch may hold at most {MAX_SYNC_ITEMS} transactions; send more, smaller batches")
+
+    service: OfflineSyncService = request.app.state.offline_sync
+    return JSONResponse(status_code=200, content={"results": service.sync(caller, items)})
 
 
 @router.post("", status_code=201)

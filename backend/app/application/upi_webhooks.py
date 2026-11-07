@@ -42,19 +42,22 @@ class WebhookOutcome:
     reason: str | None = None  # why nothing was applied, when a signed webhook was still acknowledged
 
 
-class UpiWebhookHandler:
+class WebhookHandler:
+    """One class for every provider: the security and dedup are identical, only the adapter differs."""
+
     def __init__(self, adapter: PaymentMethodAdapter, transactions: WebhookTransactions,
-                 events: WebhookEventStore):
+                 events: WebhookEventStore, provider: str = "upi"):
         self.adapter = adapter
         self.transactions = transactions
         self.events = events
+        self.provider = provider
 
     def handle(self, raw: bytes, headers: Mapping[str, str]) -> WebhookOutcome:
         """Raises WebhookRejected if the callback cannot be trusted. Returns an outcome otherwise."""
         update = self.adapter.handle_webhook(
             WebhookRequest(raw=raw, headers={key.lower(): value for key, value in headers.items()}))
 
-        if not self.events.claim("upi", update.event_id):
+        if not self.events.claim(self.provider, update.event_id):
             # At-least-once delivery: the same SUCCESS arriving twice must settle once.
             return WebhookOutcome(duplicate=True, applied=False, status=None)
 
@@ -63,9 +66,14 @@ class UpiWebhookHandler:
         if found is None:
             # Signed, fresh, but about a payment we do not know. Acknowledge (the provider must stop retrying)
             # and leave a trail: this is a configuration or routing bug, not something to answer 4xx for.
-            log.warning("UPI webhook for unknown reference %s (event %s)", reference, update.event_id)
+            log.warning("%s webhook for unknown reference %s (event %s)", self.provider.upper(), reference,
+                        update.event_id)
             return WebhookOutcome(duplicate=False, applied=False, reason="unknown transaction")
 
         transaction_id, terminal_id, _current = found
         apply_method_result(self.transactions, transaction_id, terminal_id, update.result)
         return WebhookOutcome(duplicate=False, applied=True, status=update.result.status)
+
+
+# Kept for the call sites and tests written before wallets arrived.
+UpiWebhookHandler = WebhookHandler

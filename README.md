@@ -79,10 +79,11 @@ The target design. What exists today is listed under Current status.
 | UPI adapter + mock PSP (collect, status, refund, polling fallback) | ✅ Step 10A (`backend/app/infrastructure/methods/upi.py`, `mock-psp/`) |
 | UPI webhook endpoint (HMAC, replay window, idempotent delivery) | ✅ Step 10B (`backend/app/api/upi_webhooks.py`, `application/upi_webhooks.py`; spec 1.6.0) |
 | QR adapter (parses UPI QR, dispatches to the encoded rail) | ✅ Step 11 (`backend/app/infrastructure/methods/qr.py`) |
+| Wallet adapter, tokenised direct debit (redirect flow pending spec 1.7.0) | 🟡 Step 12 (`backend/app/infrastructure/methods/wallet.py`, `mock-wallet/`) |
 
 **Try it:** [take a test payment in 5 minutes](docs/quickstart.md).
 
-How it works: [terminal payments (Step 5)](docs/step5.md), [merchant SDKs (Step 6)](docs/step6.md), [the audit log (Step 7)](docs/step7.md), [payment method adapters (Step 8)](docs/step8.md), [UPI (Step 10A)](docs/step10a.md), [the UPI webhook (Step 10B)](docs/step10b.md), [QR (Step 11)](docs/step11.md).
+How it works: [terminal payments (Step 5)](docs/step5.md), [merchant SDKs (Step 6)](docs/step6.md), [the audit log (Step 7)](docs/step7.md), [payment method adapters (Step 8)](docs/step8.md), [UPI (Step 10A)](docs/step10a.md), [the UPI webhook (Step 10B)](docs/step10b.md), [QR (Step 11)](docs/step11.md), [wallets (Step 12)](docs/step12.md).
 
 ## The contract
 

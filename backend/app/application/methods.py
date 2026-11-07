@@ -98,6 +98,9 @@ class MethodRequest:
     details: dict
     customer_ref: str | None = None
     metadata: dict = field(default_factory=dict)
+    # The hosts this attempt may use, in preference order. The engine sets one host per cascade attempt; an
+    # adapter that cannot choose a host (UPI, wallet) ignores it, and the card adapter forwards it to Rust.
+    host_hint: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,11 @@ class MethodResult:
     reversal: str = "NOT_NEEDED"
     bin: str | None = None  # instrument display data, when the method has an instrument
     last4: str | None = None
+    # Present when the customer must finish elsewhere (wallet login, 3-D Secure): {"type", "url"}.
+    next_action: dict | None = None
+    # Which host actually answered, when the adapter was given a choice. It can differ from the host asked
+    # for if the connector failed over internally, so the engine records this, not its own assumption.
+    host_used: str | None = None
 
     @property
     def retryable(self) -> bool:
@@ -160,6 +168,8 @@ class CapabilityDescriptor:
     is_synchronous: bool  # True: initiate() returns the final outcome. False: PENDING, settled by webhook.
     dispute_rules: DisputeRules
     transitions: tuple[Transition, ...]
+    # Methods accepted without connectivity publish what the SDK must enforce locally (contract 1.7.0).
+    offline_limits: dict | None = None
 
     def supports(self, capability: str) -> bool:
         """`supports("partial_refund")` and `supports("supports_partial_refund")` both work."""
@@ -183,7 +193,7 @@ class CapabilityDescriptor:
             "is_synchronous": self.is_synchronous,
             "dispute_rules": self.dispute_rules.to_dict(),
             "transitions": [t.to_dict() for t in self.transitions],
-        }
+        } | ({"offline_limits": self.offline_limits} if self.offline_limits else {})
 
 
 class PaymentMethodAdapter(Protocol):

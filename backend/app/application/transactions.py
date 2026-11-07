@@ -10,16 +10,18 @@ with a different body it's a 409. A retryable failure is not stored as the key's
 """
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from app.application.authorization import AuthorizationService
+from app.application.hosts import NoHealthyHostError
 from app.application.methods import (AdapterUnavailable, InvalidMethodDetails, MethodRegistry, MethodRequest,
                                      MethodResult, OutcomeUnknown)
 from app.application.registration import Forbidden, NotFound, RegistrationError, Unauthenticated
+from app.application.routing import RoutingEngine, cascade
 
 # Daily limits reset at midnight in India, where the merchants are.
 # shortcut: one time zone for every merchant; take it from the merchant record when there are others.
@@ -73,6 +75,7 @@ class CardResult:
     reversal: str
     card_bin: str
     card_last4: str
+    host_used: str | None = None  # the acquirer that answered, when the fleet had a choice
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,7 @@ class CardRequest:
     encrypted_card_data: str
     card_expiry: str
     pin_block: str | None
+    host_hint: list[str] = field(default_factory=list)  # acquirers to try, in order; empty: the connector's own
 
 
 class CardOutcomeUnknown(Exception):
@@ -131,7 +135,8 @@ class TransactionRepository(Protocol):
     def claim(self, txn: NewTransaction) -> Claim: ...
     def mark_pending(self, transaction_id: UUID, terminal_id: UUID) -> None: ...
     def finish(self, transaction_id: UUID, terminal_id: UUID, result: MethodResult | None, status: str,
-               error: dict | None, store_response: bool) -> dict: ...
+               error: dict | None, store_response: bool,
+               attempts: list[dict] | None = None) -> dict: ...
 
 
 def request_hash(body: dict[str, Any]) -> bytes:
@@ -165,6 +170,9 @@ class TransactionService:
     authorization: AuthorizationService
     methods: MethodRegistry
     now: Any = field(default=None)  # callable returning an aware datetime; tests can fix the clock
+    # Step 15: set in production so every payment gets a route plan and transient failures cascade. None keeps
+    # the single-attempt path, which is what a service without routing rules (and most unit tests) should do.
+    routing: RoutingEngine | None = None
 
     def create(self, caller_terminal: UUID | None, body: dict[str, Any]) -> dict:
         """`body` is the validated request (JSON-ready). Returns the TransactionResponse to send with 201."""
@@ -218,12 +226,40 @@ class TransactionService:
                      "error_category": "HARD_DECLINE", "retryable": False}
             return self.repo.finish(transaction_id, caller_terminal, None, "FAILED", error, store_response=True)
 
+        # Step 15: pick the shortlist before the network is touched. No healthy host is a retryable failure,
+        # not a 500: nothing was sent, and the same key may run once a host recovers.
+        plan = None
+        if self.routing is not None:
+            try:
+                plan = self.routing.route(str(merchant), txn.payment_method, txn.amount)
+            except NoHealthyHostError as exc:
+                error = system_error("HOST_UNAVAILABLE", str(exc), True)
+                return self.repo.finish(transaction_id, caller_terminal, None, "FAILED", error, store_response=False)
+
         request = MethodRequest(
             transaction_id=transaction_id, amount=txn.amount, currency=txn.currency,
             capture_mode=txn.capture_mode, merchant_id=merchant, terminal_id=caller_terminal,
             details=details, customer_ref=body.get("customer_ref"), metadata=txn.metadata)
         self.repo.mark_pending(transaction_id, caller_terminal)
         try:
+            # Cascade only where a hint can actually change who is asked. A rail bound to one provider must
+            # not be retried on a soft failure: that is the same request to the same place, not a failover.
+            if plan is not None and plan.candidates and getattr(adapter, "SUPPORTS_HOST_ROUTING", False):
+                hosts_tried: list[str] = []
+
+                def attempt(host: str) -> MethodResult:
+                    hosts_tried.append(host)
+                    return adapter.initiate(replace(request, host_hint=[host]))
+
+                result, trail = cascade(hosts=plan.candidates, attempt=attempt)
+                # Rust may have failed over *inside* an attempt; it reports the host that answered. Keep the
+                # host we asked for in `asked`, and correct `host` to the one that actually answered.
+                if result.host_used and trail and result.status != "FAILED":
+                    trail[-1]["asked"] = hosts_tried[-1]
+                    trail[-1]["host"] = result.host_used
+                return self.repo.finish(
+                    transaction_id, caller_terminal, result, result.status, result.error,
+                    store_response=not result.retryable, attempts=trail)
             result = adapter.initiate(request)
         except AdapterUnavailable as exc:
             error = system_error("INTERNAL_ERROR", exc.message, True)

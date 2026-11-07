@@ -4,6 +4,7 @@
 //! service decrypts it in the HSM ([`hsm`]), sends it to the acquirer through the host connector, reverses it
 //! if the outcome is unknown ([`flow`]), and answers with the outcome and a masked card.
 
+pub mod fleet;
 pub mod flow;
 pub mod hsm;
 pub mod http;

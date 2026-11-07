@@ -32,10 +32,21 @@ class Settings:
     card_service_url: str = "http://127.0.0.1:7070"  # card-service/ (holds the HSM and the acquirer link)
     # Step 10A: the UPI PSP. mock-psp/mock_psp.py speaks the same shapes locally.
     upi_psp_url: str = "http://127.0.0.1:8080"
+    # Step 12: the wallet provider. mock-wallet/mock_wallet.py speaks the same shapes locally.
+    wallet_url: str = "http://127.0.0.1:8090"
     # A UPI payment still PENDING after this long is polled for its real status (webhooks can be lost).
     upi_poll_stale_seconds: int = 300
     # Shared secret the PSP signs webhooks with. Empty means the endpoint refuses every callback (fails closed).
     upi_webhook_secret: str = ""
+    # Same, for the wallet provider (Step 12b). A separate secret: rotating one must not touch the other.
+    wallet_webhook_secret: str = ""
+    # Step 14.8: how often to poll card-service for its host health, and which card hosts it is expected to
+    # report. Named, so a failed poll can say "acquirer_a DOWN" instead of "no card hosts".
+    health_poll_seconds: float = 5.0
+    card_hosts: tuple[str, ...] = ("acquirer_a", "acquirer_b")
+    # Step 15: the host preference per payment method, e.g. {"CARD": ["acquirer_a", "acquirer_b"]}. These are
+    # fleet-wide defaults until per-merchant rules have a table. Empty disables routing and its cascade.
+    routing_rules: dict[str, tuple[str, ...]] = field(default_factory=dict)
     # Seconds between webhook delivery runs; 0 turns the background deliverer off (tests drive it directly).
     webhook_interval: float = 2.0
     # http:// webhook URLs: local development and tests only.
@@ -62,8 +73,14 @@ class Settings:
                 json.loads(os.environ.get("CERTIFIED_FIRMWARE", "null")) or DEFAULT_CERTIFIED_FIRMWARE),
             card_service_url=os.environ.get("CARD_SERVICE_URL", "http://127.0.0.1:7070"),
             upi_psp_url=os.environ.get("UPI_PSP_URL", "http://127.0.0.1:8080"),
+            wallet_url=os.environ.get("WALLET_URL", "http://127.0.0.1:8090"),
             upi_poll_stale_seconds=int(os.environ.get("UPI_POLL_STALE_SECONDS", "300")),
             upi_webhook_secret=os.environ.get("UPI_WEBHOOK_SECRET", ""),
+            wallet_webhook_secret=os.environ.get("WALLET_WEBHOOK_SECRET", ""),
+            health_poll_seconds=float(os.environ.get("HEALTH_POLL_SECONDS", "5")),
+            card_hosts=tuple(h for h in os.environ.get("CARD_HOSTS", "acquirer_a,acquirer_b").split(",") if h),
+            routing_rules={method: tuple(hosts) for method, hosts in
+                           (json.loads(os.environ.get("ROUTING_RULES", "null")) or {}).items()},
             webhook_interval=float(os.environ.get("WEBHOOK_INTERVAL_SECONDS", "2")),
             allow_insecure_webhooks=os.environ.get("ALLOW_INSECURE_WEBHOOKS") == "1",
             audit_worm_backend=os.environ.get("AUDIT_WORM_BACKEND", "local"),

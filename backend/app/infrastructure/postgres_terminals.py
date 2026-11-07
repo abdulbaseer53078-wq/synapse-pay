@@ -158,6 +158,14 @@ class PostgresTerminalRepository:
             _audit(conn, actor, actor_id, terminal_id, action, current.status, to, reason)
             return changed_at
 
+    def terminal_public_key(self, terminal_id: UUID) -> str | None:
+        """The registration certificate's public key: what proves an offline batch came from this terminal."""
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT c.public_key_pem FROM terminals t JOIN certificates c"
+                " ON c.certificate_id = t.certificate_id WHERE t.terminal_id = %s", (terminal_id,)).fetchone()
+        return row[0] if row else None
+
     def heartbeat_context(self, terminal_id: UUID) -> HeartbeatContext | None:
         with self.pool.connection() as conn:
             row = conn.execute(

@@ -95,7 +95,7 @@ pub fn outcome(kind: &TransactionKind, result: &Result<HostResponse, HostError>)
             auth_code: Some(authorization_code.clone()).filter(|c| !c.is_empty()),
             error: None,
         },
-        Ok(HostResponse { decision: Decision::Declined { category }, response_code, host_reference }) => {
+        Ok(HostResponse { decision: Decision::Declined { category }, response_code, host_reference, .. }) => {
             let (cat, retryable) = match category {
                 DeclineCategory::Soft => ("SOFT_DECLINE", true),
                 DeclineCategory::Hard => ("HARD_DECLINE", false),

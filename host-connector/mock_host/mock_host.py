@@ -9,6 +9,9 @@ The outcome is chosen by the request amount (DE 4, minor units), as acquirer san
     2000  timeout: sleep --sleep seconds (default 20), then answer "00" if the connection is still open
     9900  system error: drop the connection without answering
     else  approve: DE 39 "00" with an authorization code (DE 38)
+`--soft-decline-amount N` (repeatable) adds amounts that answer DE 39 "91" (issuer unavailable): a soft decline,
+the case the cascade may retry on another acquirer. It is per process, so two mock hosts can disagree about the
+same amount, which is how the cross-acquirer failover test is built.
 An 0800 network echo is answered with an 0810, DE 39 "00".
 A reversal (0400/0420) never sleeps or drops: it is answered "00" if DE 90 quotes the MTI and STAN of a request
 this mock received, else "25" (unable to locate original), whatever its amount.
@@ -126,7 +129,7 @@ SEEN = set()  # (MTI, STAN) of every financial request received, for checking re
 SEEN_LOCK = threading.Lock()
 
 
-def answer(dialect, conn, send_lock, mti, req, sleep):
+def answer(dialect, conn, send_lock, mti, req, sleep, soft_decline_amounts=()):
     amount = int(req.get(4, b"0") or 0)
     if mti == "0800":
         scenario, resp_mti = "echo", "0810"
@@ -142,10 +145,14 @@ def answer(dialect, conn, send_lock, mti, req, sleep):
     else:
         with SEEN_LOCK:
             SEEN.add((mti, req.get(11, b"").decode()))
-        scenario, resp_mti = SCENARIOS.get(amount, "approve"), "%04d" % (int(mti) + 10)
+        if amount in soft_decline_amounts:
+            scenario = "soft-decline"
+        else:
+            scenario = SCENARIOS.get(amount, "approve")
+        resp_mti = "%04d" % (int(mti) + 10)
         resp = {n: req[n] for n in ECHOED if n in req}
-        resp[39] = b"51" if scenario == "decline" else b"00"
-        if scenario != "decline":
+        resp[39] = {"decline": b"51", "soft-decline": b"91"}.get(scenario, b"00")
+        if scenario not in ("decline", "soft-decline"):
             resp[38] = b"AUTH%02d" % (amount % 100)
     log(f"{mti} stan={req.get(11, b'').decode()} amount={amount} -> {scenario}")
     if scenario == "drop":
@@ -161,7 +168,7 @@ def answer(dialect, conn, send_lock, mti, req, sleep):
         log(f"{resp_mti} stan={req.get(11, b'').decode()} not delivered: connection gone")
 
 
-def serve(dialect, conn, sleep):
+def serve(dialect, conn, sleep, soft_decline_amounts=()):
     send_lock = threading.Lock()
     try:
         while (msg := read_frame(conn)) is not None:
@@ -171,7 +178,8 @@ def serve(dialect, conn, sleep):
                 log(f"rejected a malformed message ({e}); closing")
                 return
             # One thread per request: a slow answer mustn't hold up the others on this connection.
-            threading.Thread(target=answer, args=(dialect, conn, send_lock, mti, req, sleep), daemon=True).start()
+            threading.Thread(target=answer, args=(dialect, conn, send_lock, mti, req, sleep, soft_decline_amounts),
+                             daemon=True).start()
     except OSError:
         pass
     finally:
@@ -186,6 +194,8 @@ def main():
     p.add_argument("--client-ca", required=True, help="CA that issues client certificates (PEM)")
     p.add_argument("--dialect", required=True, help="dialect dictionary JSON")
     p.add_argument("--sleep", type=float, default=20, help="seconds the timeout scenario waits")
+    p.add_argument("--soft-decline-amount", type=int, action="append", default=[],
+                   help="amount that answers DE 39 91 (soft decline); repeatable")
     args = p.parse_args()
 
     dialect = Dialect(args.dialect)
@@ -205,7 +215,7 @@ def main():
             log(f"TLS handshake refused: {e.__class__.__name__}")
             raw.close()
             continue
-        threading.Thread(target=serve, args=(dialect, conn, args.sleep), daemon=True).start()
+        threading.Thread(target=serve, args=(dialect, conn, args.sleep, set(args.soft_decline_amount)), daemon=True).start()
 
 
 if __name__ == "__main__":

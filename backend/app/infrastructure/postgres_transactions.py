@@ -180,7 +180,7 @@ class PostgresTransactionRepository:
             _audit(conn, terminal_id, transaction_id, "transaction.send", "INITIATED", "PENDING")
 
     def finish(self, transaction_id: UUID, terminal_id: UUID, result: MethodResult | None, status: str,
-               error: dict | None, store_response: bool) -> dict:
+               error: dict | None, store_response: bool, attempts: list[dict] | None = None) -> dict:
         with self.pool.connection() as conn, conn.transaction():
             (previous,) = conn.execute("SELECT status FROM transactions WHERE transaction_id = %s FOR UPDATE",
                                        (transaction_id,)).fetchone()
@@ -195,6 +195,10 @@ class PostgresTransactionRepository:
                  result.bin if result else None, result.last4 if result else None,
                  result.reversal if result else None, transaction_id)).fetchone()
             response = _response(row[:12])
+            if result and result.next_action:
+                # The SDK opens this URL; it is part of the response, and therefore of the stored idempotent
+                # replay, so a retry returns the same redirect instead of starting a second payment.
+                response["next_action"] = result.next_action
             merchant_id, idempotency_key, intent_id, webhook_url = row[12], row[1], row[13], row[14]
             if intent_id is not None:
                 response["payment_intent_id"] = f"pi_{intent_id.hex}"
@@ -212,6 +216,9 @@ class PostgresTransactionRepository:
                              (merchant_id, idempotency_key))
             reason = error["error_code"] if error else (f"reversal {result.reversal}" if result and
                                                          result.reversal != "NOT_NEEDED" else None)
-            _audit(conn, terminal_id, transaction_id, "transaction.finish", previous, status, reason)
+            # The cascade's attempt trail is written in this same transaction as the final state, so a rollback
+            # takes both: the log can never claim a host was tried for a transaction that never happened.
+            _audit(conn, terminal_id, transaction_id, "transaction.finish", previous, status, reason,
+                   payload={"attempts": attempts} if attempts else None)
             return response
 

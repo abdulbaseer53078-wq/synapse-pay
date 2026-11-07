@@ -30,16 +30,25 @@ pub trait HostConnector: Send + Sync {
     fn check_health(&self) -> BoxFuture<'_, HostStatus>;
 }
 
-/// Per-request context (Go's `context.Context`): when to give up, and how to correlate logs.
+/// Per-request context (Go's `context.Context`): when to give up, how to correlate logs, and which hosts this
+/// particular request may use. The hint is per request because the routing engine decides it per transaction.
 #[derive(Debug, Clone)]
 pub struct RequestContext {
     pub deadline: Instant,
     pub trace_id: String,
+    /// Hosts to try, in order. Empty means "whatever the connector is configured with".
+    pub host_hint: Vec<String>,
 }
 
 impl RequestContext {
     pub fn with_timeout(timeout: Duration, trace_id: impl Into<String>) -> Self {
-        Self { deadline: Instant::now() + timeout, trace_id: trace_id.into() }
+        Self { deadline: Instant::now() + timeout, trace_id: trace_id.into(), host_hint: Vec::new() }
+    }
+
+    /// Choose the hosts this request may use, in preference order.
+    pub fn with_hosts(mut self, hosts: Vec<String>) -> Self {
+        self.host_hint = hosts;
+        self
     }
 }
 
@@ -90,6 +99,9 @@ pub struct HostResponse {
     pub response_code: String,
     /// The host's reference for this transaction (e.g. the RRN, DE 37), if it gave one.
     pub host_reference: Option<String>,
+    /// Which host actually answered. Filled by the failover layer, empty when a single connector answered
+    /// directly. The audit trail must record this, not the host we asked for: they differ when a retry happened.
+    pub host_used: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
