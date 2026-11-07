@@ -92,7 +92,7 @@ def test_create_is_idempotent(merchant_api, app_client):
     r1 = merchant_api(idempotency_key=key, metadata={"order": "7781"})
     assert r1.status_code == 201, r1.text
     intent = r1.json()
-    assert intent["id"].startswith("pi_") and intent["client_secret"].startswith("pis_")
+    assert intent["id"].startswith("pi_") and intent["client_secret"].startswith(intent["id"] + "_secret_")
     assert intent["status"] == "REQUIRES_PAYMENT_METHOD" and intent["metadata"] == {"order": "7781"}
     r2 = merchant_api(idempotency_key=key, metadata={"order": "7781"})
     assert r2.status_code == 200 and r2.json()["id"] == intent["id"]

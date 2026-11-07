@@ -14,6 +14,8 @@ from app.application.registration import Forbidden, InvalidInput, Unauthenticate
 
 router = APIRouter(tags=["payment intents"])
 CHECKOUT_DIR = Path(__file__).parents[1] / "checkout"
+# The web SDK's <script> build (npm run build in sdks/web). shortcut: served by the API; a CDN in production.
+WEB_SDK = Path(__file__).parents[3] / "sdks" / "web" / "dist" / "synapsepay.js"
 
 
 class _Body(BaseModel):
@@ -117,6 +119,14 @@ def card_frame() -> FileResponse:
 def checkout_asset(name: Literal["card-frame.js", "card-frame.css", "acs.js"]) -> FileResponse:
     media = "text/css" if name.endswith(".css") else "text/javascript"
     return FileResponse(CHECKOUT_DIR / name, media_type=media)
+
+
+@router.get("/js/synapsepay.js")
+def web_sdk() -> FileResponse:
+    if not WEB_SDK.exists():
+        from app.application.registration import NotFound
+        raise NotFound("web SDK not built: run npm run build in sdks/web", "INVALID_REQUEST")
+    return FileResponse(WEB_SDK, media_type="text/javascript", headers={"cache-control": "public, max-age=300"})
 
 
 # Sandbox issuer (ACS) challenge page. shortcut: stands in for the issuer's 3-D Secure page.

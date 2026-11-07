@@ -1,0 +1,20 @@
+{
+  "name": "@synapsepay/web",
+  "version": "0.1.0",
+  "description": "Synapse Pay for websites: a hosted card field, 3-D Secure and terminal checkout. Works with any framework.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "./dist/synapsepay.esm.js",
+  "module": "./dist/synapsepay.esm.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/synapsepay.esm.js" } },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && esbuild src/index.ts --bundle --format=esm --target=es2020 --outfile=dist/synapsepay.esm.js && esbuild src/global.ts --bundle --format=iife --target=es2020 --minify --outfile=dist/synapsepay.js",
+    "test": "npm run build && node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}
