@@ -21,6 +21,8 @@ from app.config import Settings
 from app.infrastructure.config_certification import ConfigCertificationRegistry
 from app.infrastructure.file_ca import FileCertificateAuthority
 from app.infrastructure.methods.card import CardMethodAdapter
+from app.infrastructure.methods.upi import UpiMethodAdapter
+from app.infrastructure.upi_client import HttpUpiPsp
 from app.infrastructure.card_service_client import HttpCardProcessor
 from app.infrastructure.postgres_api_keys import PostgresApiKeys
 from app.infrastructure.postgres_audit import PostgresAuditStore
@@ -74,8 +76,8 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     )
     app.state.authorization = AuthorizationService(repo, certification)
     cards = cards or HttpCardProcessor(settings.card_service_url)
-    # Step 8: the one place a rail is chosen. Adding UPI is one more line here and a module beside card.py.
-    methods = MethodRegistry([CardMethodAdapter(cards)])
+    # Step 8: the one place a rail is chosen. Adding UPI was one line here and a module beside card.py.
+    methods = MethodRegistry([CardMethodAdapter(cards), UpiMethodAdapter(HttpUpiPsp(settings.upi_psp_url))])
     app.state.methods = methods
     app.state.transactions = TransactionService(PostgresTransactionRepository(pool), app.state.authorization, methods)
     app.state.intents = PaymentIntentService(PostgresIntentRepository(pool), cards)

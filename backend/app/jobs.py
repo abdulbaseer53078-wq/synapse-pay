@@ -16,6 +16,9 @@ Schedule it hourly (Step 7.7) — a chain nobody checks is a decoration.
 
 audit-seed writes a synthetic payment timeline to audit_log, so the pipeline can be demonstrated and tested
 before the SDK and terminal producers exist.
+
+upi-poll runs forever, asking the PSP for the authoritative status of UPI payments a lost webhook left PENDING
+(Step 10A). Webhooks are primary; this is the fallback.
 """
 import os
 import sys
@@ -27,12 +30,14 @@ from psycopg_pool import ConnectionPool
 
 from app.application.audit import AuditVerifier
 from app.application.events import EventRelay
+from app.application.transactions import apply_method_result
 from app.infrastructure.audit_alerts import NullAlerter, WebhookAlerter
 from app.infrastructure.audit_worm import worm_from_env
 from app.infrastructure.postgres_audit import PostgresAuditStore
 from app.infrastructure.postgres_terminals import PostgresTerminalRepository
+from app.infrastructure.postgres_transactions import PostgresTransactionRepository
 
-JOBS = ("refresh-health", "relay-events", "audit-ingest", "audit-publish", "verify-audit", "audit-seed")
+JOBS = ("refresh-health", "relay-events", "audit-ingest", "audit-publish", "verify-audit", "audit-seed", "upi-poll")
 USAGE = f"usage: python -m app.jobs {' | '.join(JOBS)}"
 
 
@@ -51,6 +56,9 @@ def main(argv: list[str]) -> None:
             return
         if job == "relay-events":
             _relay(pool)
+            return
+        if job == "upi-poll":
+            _upi_poll(pool)
             return
         store = PostgresAuditStore(pool)
         if job == "audit-ingest":
@@ -71,6 +79,31 @@ def _relay(pool: ConnectionPool) -> None:
     from app.infrastructure.kafka_events import KafkaEventPublisher  # only this job needs the Kafka client
     relay = EventRelay(PostgresTerminalRepository(pool), KafkaEventPublisher(os.environ["KAFKA_BOOTSTRAP_SERVERS"]))
     _forever(lambda: relay.run_once(), idle=0.2)
+
+
+def _upi_poll(pool: ConnectionPool) -> None:
+    """The polling fallback (Step 10A): resolve UPI payments a lost webhook left PENDING.
+
+    Webhooks are primary; this exists because they get lost. It asks the PSP for the authoritative status and
+    hands the answer to `apply_method_result`, the same path the synchronous engine uses — the adapter never
+    writes state.
+    """
+    from app.infrastructure.methods.upi import UpiMethodAdapter
+    from app.infrastructure.upi_client import HttpUpiPsp
+
+    adapter = UpiMethodAdapter(HttpUpiPsp(os.environ["UPI_PSP_URL"]))
+    repo = PostgresTransactionRepository(pool)
+    stale_after = int(os.environ.get("UPI_POLL_STALE_SECONDS", "300"))
+
+    def once() -> int:
+        rows = repo.stale_pending("UPI", stale_after)
+        for transaction_id, terminal_id, reference in rows:
+            result = adapter.status(transaction_id, reference)
+            if result.status != "PENDING":  # still pending is a valid answer: leave it for the next pass
+                apply_method_result(repo, transaction_id, terminal_id, result)
+        return len(rows)
+
+    _forever(once, idle=5.0, done=lambda n: print(f"polled {n} pending UPI transaction(s)"))
 
 
 def _publish(store: PostgresAuditStore) -> None:
