@@ -118,6 +118,19 @@ impl IsoHostPool {
     pub fn connections_up(&self) -> usize {
         (0..self.shared.conns.len()).filter(|&i| self.shared.is_up(i)).count()
     }
+
+    /// Send with a caller-supplied STAN, so a fleet-level retry can reuse one across hosts.
+    ///
+    /// The STAN is minted where the transaction enters the system (card-service), not here: two STANs for one
+    /// payment are two transactions on the wire, and only one of them reconciles against the clearing file.
+    pub async fn send_with_stan(&self, ctx: &RequestContext, txn: &Transaction, stan: String)
+        -> Result<HostResponse, HostError> {
+        let Some(conn) = self.shared.checkout(ctx.deadline).await else {
+            return Err(HostError::Unavailable("no free connection before the deadline".into()));
+        };
+        // The checkout returns the connection to the pool when it drops at the end of this scope.
+        self.shared.conns[conn.index].send_with_stan(ctx, txn, stan).await
+    }
 }
 
 impl Drop for IsoHostPool {
