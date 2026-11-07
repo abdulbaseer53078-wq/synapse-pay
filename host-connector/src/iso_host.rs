@@ -199,14 +199,18 @@ impl Drop for IsoHostConnector {
     }
 }
 
-impl HostConnector for IsoHostConnector {
-    fn send_transaction<'a>(&'a self, ctx: &'a RequestContext, txn: &'a Transaction)
+impl IsoHostConnector {
+    /// Send with a STAN chosen by the caller; the trait method mints its own.
+    ///
+    /// DE 11 is what ties a request to its response and to any reversal built from it, so a cross-host retry
+    /// must reuse one STAN. Two STANs for one payment are two transactions on the wire, and the clearing file can
+    /// only reconcile one of them.
+    pub fn send_with_stan<'a>(&'a self, ctx: &'a RequestContext, txn: &'a Transaction, stan: String)
         -> BoxFuture<'a, Result<HostResponse, HostError>> {
         Box::pin(async move {
             if Instant::now() >= ctx.deadline {
                 return Err(HostError::Unavailable("deadline passed before sending".into()));
             }
-            let stan = self.next_stan();
             let original = match &txn.kind {
                 TransactionKind::Reversal { original_transaction_id } => Some(
                     self.originals.lock().unwrap().get(original_transaction_id).ok_or_else(|| {
@@ -228,6 +232,13 @@ impl HostConnector for IsoHostConnector {
             let raw = self.exchange(ctx, &txn.transaction_id, stan, &wire).await?;
             parse_response(&raw, &mti, &self.config)
         })
+    }
+}
+
+impl HostConnector for IsoHostConnector {
+    fn send_transaction<'a>(&'a self, ctx: &'a RequestContext, txn: &'a Transaction)
+        -> BoxFuture<'a, Result<HostResponse, HostError>> {
+        self.send_with_stan(ctx, txn, self.next_stan())
     }
 
     fn check_health(&self) -> BoxFuture<'_, HostStatus> {
