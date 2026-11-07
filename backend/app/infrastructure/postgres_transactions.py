@@ -5,7 +5,8 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-from app.application.transactions import CardResult, Claim, NewTransaction, public_id
+from app.application.methods import MethodResult
+from app.application.transactions import Claim, NewTransaction, public_id
 from app.domain.terminal import Actor
 from app.infrastructure.webhook_outbox import enqueue
 from app.infrastructure.postgres_terminals import _OUTBOX_LOCK
@@ -147,7 +148,7 @@ class PostgresTransactionRepository:
                          (transaction_id,))
             _audit(conn, terminal_id, transaction_id, "transaction.send", "INITIATED", "PENDING")
 
-    def finish(self, transaction_id: UUID, terminal_id: UUID, result: CardResult | None, status: str,
+    def finish(self, transaction_id: UUID, terminal_id: UUID, result: MethodResult | None, status: str,
                error: dict | None, store_response: bool) -> dict:
         with self.pool.connection() as conn, conn.transaction():
             (previous,) = conn.execute("SELECT status FROM transactions WHERE transaction_id = %s FOR UPDATE",
@@ -160,14 +161,14 @@ class PostgresTransactionRepository:
                 " payment_intent_id, webhook_url",
                 (status, Jsonb(error) if error else None,
                  result.method_reference if result else None, result.auth_code if result else None,
-                 result.card_bin if result else None, result.card_last4 if result else None,
+                 result.bin if result else None, result.last4 if result else None,
                  result.reversal if result else None, transaction_id)).fetchone()
             response = _response(row[:12])
             merchant_id, idempotency_key, intent_id, webhook_url = row[12], row[1], row[13], row[14]
             if intent_id is not None:
                 response["payment_intent_id"] = f"pi_{intent_id.hex}"
-                settle_intent(conn, intent_id, status, error, result.card_bin if result else None,
-                              result.card_last4 if result else None)
+                settle_intent(conn, intent_id, status, error, result.bin if result else None,
+                              result.last4 if result else None)
             if status != "PENDING":
                 enqueue(conn, merchant_id, webhook_url, response)
             if store_response:
