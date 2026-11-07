@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.7.0
+  version: 1.8.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
     goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions.
@@ -617,6 +617,13 @@ paths:
         The cloud re-checks the offline_limits from the method's capability descriptor, the item age and the
         terminal signature; it is the authority. The SDK enforces the same limits first so a customer is never
         told "yes" for a payment that will fail an hour later.
+
+        **Canonical signature (1.8.0).** A signature cannot cover the object that carries it, so both sides
+        sign the item *without* the `signature` field: remove `signature`, sort the remaining keys
+        alphabetically, serialise compactly (JSON with no insignificant whitespace, UTF-8), and sign those
+        exact bytes with the terminal's registration key. The cloud repeats the same steps and verifies against
+        the certificate's public key. Any other serialisation (pretty-printed, keys in insertion order,
+        floats reformatted) produces different bytes and fails — which is the point: there is one encoding.
       security:
         - MutualTLS: []
         - OAuth2ClientCredentials: [transactions:write]
@@ -687,6 +694,56 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
         5XX: { $ref: '#/components/responses/Error' }
+  /v1/webhooks/wallet:
+    post:
+      operationId: walletWebhook
+      summary: Wallet provider callback (public; HMAC-authenticated)
+      description: >-
+        Same contract as `/v1/webhooks/upi`, different headers: `X-Wallet-Timestamp` and `X-Wallet-Signature`,
+        over the same `<timestamp>.<raw body>` message and with the same 300-second window. Delivery ids are
+        namespaced per provider, so a wallet event cannot collide with a UPI one. A correctly signed callback
+        is answered 200 even when it is a duplicate or names a payment we do not know.
+      security: []
+      parameters:
+        - name: X-Wallet-Timestamp
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[0-9]+$' }
+        - name: X-Wallet-Signature
+          in: header
+          required: true
+          description: Lowercase hex HMAC-SHA256 of "<timestamp>.<raw body>".
+          schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [event_id, wallet_transaction_id, status]
+              properties:
+                event_id: { type: string, maxLength: 128 }
+                wallet_transaction_id: { type: string, maxLength: 128 }
+                status: { type: string, enum: [SUCCESS, FAILURE] }
+                reason: { type: string, maxLength: 256 }
+      responses:
+        '200':
+          description: Acknowledged — applied, a duplicate, or about a payment we do not know.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [received, duplicate, applied]
+                properties:
+                  received: { const: true }
+                  duplicate: { type: boolean }
+                  applied: { type: boolean }
+                  status: { type: [string, 'null'] }
+                  reason: { type: [string, 'null'] }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/webhooks/upi:
     post:
       operationId: upiWebhook
@@ -1516,6 +1573,10 @@ components:
       description: |
         Transaction lifecycle. Allowed transitions:
 
+        PENDING_OFFLINE is a terminal-side state (the SDK's local queue, and the edge node in Stage 4). The
+        cloud never writes it: it only learns of an offline payment at sync, by which point the underlying rail
+        has already decided PENDING, SETTLED or FAILED. The value exists in the enum so the terminal can tell
+        the customer (and support) "queued, not yet synced" without inventing its own vocabulary.
         - INITIATED → PENDING
         - PENDING → AUTHORIZED | FAILED
         - AUTHORIZED → CAPTURED | VOIDED (void only before capture)
