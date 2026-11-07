@@ -2,7 +2,7 @@
 
 **A Terminal-to-Cloud payment network that routes every payment method through one unified contract, designed to keep accepting payments when the internet drops.**
 
-> **Status:** Stage 1 in progress. A card payment now runs end to end in tests: terminal request → API backend → card service (simulated HSM) → ISO 8583 host connector → mock acquirer, and back. The terminal app itself (Step 5B) is next.
+> **Status:** Stage 1 in progress, sandbox only. Websites take card payments end to end (Synapse card frame → 3-D Secure → ISO 8583 → mock acquirer → signed webhook), and so do terminals via the API. Still to come: the terminal app (Step 5B) and the audit log (Step 7).
 
 ---
 
@@ -71,9 +71,13 @@ The target design. What exists today is listed under Current status.
 | Card service + simulated HSM | ✅ Step 5A (`card-service/`) |
 | Terminal app (Android, simulated card reader) | ⏳ Step 5B |
 | Terminal app on PAX hardware | ⏳ Step 5C |
-| Merchant SDK | ⏳ Step 6 |
+| Payment intents, hosted card frame, 3-D Secure (simulated), webhooks, terminal checkout | ✅ Step 6 |
+| Node.js server SDK, web SDK | ✅ Step 6 (`sdks/node`, `sdks/web`) |
+| Android SDK, Flutter plugin | 🟡 Step 6: written; Java core tested, Kotlin/Flutter not compiled yet |
 
-How a card payment flows, and how to run it: [`docs/step5.md`](docs/step5.md).
+**Try it:** [take a test payment in 5 minutes](docs/quickstart.md).
+
+How it works: [terminal payments (Step 5)](docs/step5.md), [merchant SDKs (Step 6)](docs/step6.md).
 
 ## The contract
 
@@ -134,6 +138,8 @@ synapse-pay/
 ├── iso8583/          # ISO 8583 message library (Rust)
 ├── host-connector/   # Acquirer connection: mTLS, pool, echo, audit, reversals (Rust) + mock acquirer
 ├── card-service/     # Simulated HSM + card flow; the only process that sees a card number (Rust)
+├── sdks/             # Merchant SDKs: node (server), web, android, flutter
+├── examples/         # A complete example shop
 ├── db/migrations/    # PostgreSQL schema
 └── docs/             # How each step works and how to run it
 ```

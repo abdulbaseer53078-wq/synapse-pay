@@ -6,3 +6,5 @@ target/
 *.key
 *-key.pem
 graphify-out/
+.sandbox/
+node_modules/

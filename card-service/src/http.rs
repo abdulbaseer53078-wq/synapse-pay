@@ -13,11 +13,13 @@ use axum::{Json, Router};
 use host_connector::HostState;
 use serde_json::json;
 
-use crate::flow::{CardFlow, CardRequest, FlowError};
+use crate::flow::{AuthenticateRequest, CardFlow, CardRequest, FlowError};
 
 pub fn router(flow: Arc<CardFlow>) -> Router {
     Router::new()
         .route("/card/transactions", post(transaction))
+        .route("/card/authenticate", post(authenticate))
+        .route("/card/checkout-key", get(checkout_key))
         .route("/health", get(health))
         .with_state(flow)
 }
@@ -25,12 +27,33 @@ pub fn router(flow: Arc<CardFlow>) -> Router {
 async fn transaction(State(flow): State<Arc<CardFlow>>, Json(req): Json<CardRequest>) -> Response {
     match flow.process(&req).await {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
-        Err(FlowError::BadCardData(why)) => {
+        Err(e) => flow_error(e),
+    }
+}
+
+fn flow_error(e: FlowError) -> Response {
+    match e {
+        FlowError::BadCardData(why) => {
             (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": "BAD_CARD_DATA", "message": why}))).into_response()
         }
-        Err(FlowError::BadRequest(why)) => {
+        FlowError::BadRequest(why) => {
             (StatusCode::BAD_REQUEST, Json(json!({"error": "BAD_REQUEST", "message": why}))).into_response()
         }
+    }
+}
+
+async fn authenticate(State(flow): State<Arc<CardFlow>>, Json(req): Json<AuthenticateRequest>) -> Response {
+    match flow.authenticate(&req) {
+        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Err(e) => flow_error(e),
+    }
+}
+
+/// The public key browsers and apps encrypt card data to. Public by design; the backend republishes it.
+async fn checkout_key(State(flow): State<Arc<CardFlow>>) -> Response {
+    match flow.hsm.checkout_public_jwk() {
+        Some(jwk) => ([("content-type", "application/json")], jwk).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({"error": "NO_CHECKOUT_KEY"}))).into_response(),
     }
 }
 

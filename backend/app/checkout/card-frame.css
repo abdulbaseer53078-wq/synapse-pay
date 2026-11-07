@@ -1,0 +1,10 @@
+:root { color-scheme: light dark; --fg: #1a1a1a; --muted: #6b6b6b; --line: #d0d0d0; --focus: #2457ff; --bad: #c62828; }
+@media (prefers-color-scheme: dark) { :root { --fg: #f0f0f0; --muted: #a0a0a0; --line: #444; --focus: #7d9bff; --bad: #ff6b6b; } }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 2px; font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--fg); background: transparent; }
+label { display: block; font-size: 13px; color: var(--muted); margin: 8px 0 4px; }
+input { width: 100%; padding: 10px 12px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 8px; outline: none; }
+input:focus { border-color: var(--focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus) 25%, transparent); }
+input[aria-invalid="true"] { border-color: var(--bad); }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+#error { min-height: 1.4em; margin: 8px 0 0; font-size: 13px; color: var(--bad); }

@@ -1,0 +1,25 @@
+group 'com.synapsepay.flutter'
+version '0.1.0'
+
+buildscript {
+    repositories { google(); mavenCentral() }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace 'com.synapsepay.flutter'
+    compileSdk 35
+    defaultConfig { minSdk 26 }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+}
+
+dependencies {
+    // The native SDK (sdks/android). Until it's on Maven Central, publishToMavenLocal it and add mavenLocal().
+    implementation 'com.synapsepay:synapsepay-android:0.1.0'
+}
