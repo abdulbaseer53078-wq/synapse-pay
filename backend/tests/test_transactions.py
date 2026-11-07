@@ -209,8 +209,8 @@ def test_merchant_must_own_the_terminal(pay):
 
 
 def test_an_unregistered_method_is_422(pay):
-    # UPI and QR are adapters now (Steps 10A and 11); WALLET is not registered until Step 12.
-    r, _ = pay(payment_method="WALLET", method_details={"wallet_provider": "PAYTM", "wallet_token": "tok"})
+    # CARD, UPI, QR and WALLET are adapters now; OFFLINE is not registered until Step 13.
+    r, _ = pay(payment_method="OFFLINE", method_details={})
     assert r.status_code == 422 and r.json()["error_code"] == "INVALID_REQUEST"
 
 
