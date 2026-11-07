@@ -1,7 +1,7 @@
 from uuid import UUID
 
 import jwt
-from fastapi import Depends, Request
+from fastapi import Depends, Header, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.application.registration import Forbidden, Unauthenticated
@@ -25,6 +25,26 @@ def with_scope(scope: str):
     """Dependency: the claims of a valid OAuth access token that carries `scope`."""
 
     def dependency(request: Request, creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> dict:
+        claims = _claims(request, creds)
+        if scope not in claims.get("scope", "").split():
+            raise Forbidden(f"access token lacks the {scope} scope")
+        return claims
+
+    return dependency
+
+
+def with_scope_or_terminal(scope: str):
+    """Dependency: a terminal (identified by the gateway's x-terminal-id) or an OAuth token carrying `scope`.
+
+    The capabilities endpoint is open to both per the spec: an SDK reads it with the merchant's token, a
+    terminal reads it over mTLS. Trusting the header is safe only behind the gateway, which strips any
+    client-supplied one — the same assumption `/api/v1/transactions` already makes.
+    """
+
+    def dependency(request: Request, x_terminal_id: str | None = Header(default=None),
+                   creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> dict | None:
+        if x_terminal_id is not None:
+            return None
         claims = _claims(request, creds)
         if scope not in claims.get("scope", "").split():
             raise Forbidden(f"access token lacks the {scope} scope")
