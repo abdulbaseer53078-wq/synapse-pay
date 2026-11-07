@@ -1,0 +1,22 @@
+{
+  "2": { "type": "LLVAR", "max_length": 19, "format": "n" },
+  "3": { "type": "FIXED", "length": 6, "format": "n" },
+  "4": { "type": "FIXED", "length": 12, "format": "n" },
+  "7": { "type": "FIXED", "length": 10, "format": "n" },
+  "11": { "type": "FIXED", "length": 6, "format": "n" },
+  "12": { "type": "FIXED", "length": 6, "format": "n" },
+  "13": { "type": "FIXED", "length": 4, "format": "n" },
+  "14": { "type": "FIXED", "length": 4, "format": "n" },
+  "18": { "type": "FIXED", "length": 4, "format": "n" },
+  "22": { "type": "FIXED", "length": 3, "format": "n" },
+  "25": { "type": "FIXED", "length": 2, "format": "n" },
+  "32": { "type": "LLVAR", "max_length": 11, "format": "n" },
+  "37": { "type": "FIXED", "length": 12, "format": "an" },
+  "38": { "type": "FIXED", "length": 6, "format": "an" },
+  "39": { "type": "FIXED", "length": 2, "format": "an" },
+  "41": { "type": "FIXED", "length": 8, "format": "ans" },
+  "42": { "type": "FIXED", "length": 15, "format": "ans" },
+  "48": { "type": "LLLVAR", "max_length": 999, "format": "ans" },
+  "49": { "type": "FIXED", "length": 3, "format": "n" },
+  "102": { "type": "LLVAR", "max_length": 28, "format": "ans" }
+}
