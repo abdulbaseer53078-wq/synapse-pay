@@ -54,6 +54,47 @@ pub struct CardResult {
     pub card_last4: String,
 }
 
+/// Online (card-not-present) payments in India need the issuer to authenticate the cardholder (RBI's
+/// additional factor of authentication), done through EMV 3-D Secure before authorization.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthenticateRequest {
+    pub transaction_id: String,
+    pub encrypted_card_data: String,
+    #[serde(default)]
+    pub encrypted_cvv: Option<String>,
+    pub amount: u64,
+    pub currency: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum ThreeDs {
+    /// The issuer authenticated without asking the cardholder anything.
+    Frictionless,
+    /// The cardholder must complete the issuer's challenge (an OTP in India).
+    Challenge,
+    /// The issuer refused to authenticate: don't authorize.
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthenticateResult {
+    pub three_ds: ThreeDs,
+    pub card_bin: String,
+    pub card_last4: String,
+}
+
+/// Simulated 3-D Secure directory server: the outcome comes from the card number, like sandbox test cards.
+/// shortcut: no real 3DS server, directory server or ACS; the challenge page is the sandbox ACS in the backend.
+pub fn simulated_three_ds(pan: &str) -> ThreeDs {
+    match pan {
+        "4242424242424242" => ThreeDs::Frictionless,
+        "4000000000003238" => ThreeDs::Rejected,
+        // As in India, where nearly every online card payment asks for an OTP.
+        _ => ThreeDs::Challenge,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowError {
     /// The card data or PIN block couldn't be used: a client problem, nothing was sent.
@@ -106,6 +147,14 @@ fn card_error(e: HsmError) -> FlowError {
 }
 
 impl CardFlow {
+    pub fn authenticate(&self, req: &AuthenticateRequest) -> Result<AuthenticateResult, FlowError> {
+        let pan = self.hsm.decrypt_pan(&req.encrypted_card_data).map_err(card_error)?;
+        if let Some(cvv) = &req.encrypted_cvv {
+            self.hsm.verify_cvv(cvv).map_err(card_error)?;
+        }
+        Ok(AuthenticateResult { three_ds: simulated_three_ds(pan.as_str()), card_bin: pan.bin(), card_last4: pan.last4() })
+    }
+
     pub async fn process(&self, req: &CardRequest) -> Result<CardResult, FlowError> {
         let expiry = expiry_yymm(&req.card_expiry)?;
         let pan = self.hsm.decrypt_pan(&req.encrypted_card_data).map_err(card_error)?;

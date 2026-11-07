@@ -137,6 +137,26 @@ async fn pin_block_is_checked() {
     assert!(matches!(flow(host).process(&req).await, Err(FlowError::BadCardData(_))));
 }
 
+#[test]
+fn three_ds_outcome_comes_from_the_test_card() {
+    use card_service::flow::{AuthenticateRequest, ThreeDs};
+    let flow = flow(Arc::new(MockHostConnector::new()));
+    let auth = |pan: &str| {
+        let req = AuthenticateRequest { transaction_id: "t".into(), amount: 100, currency: "INR".into(),
+                                        encrypted_cvv: Some(hsm().seal([3; 10], [4; 12], "cvv", b"123")),
+                                        encrypted_card_data: hsm().seal([1; 10], [2; 12], "data", pan.as_bytes()) };
+        flow.authenticate(&req).unwrap()
+    };
+    assert_eq!(auth(PAN).three_ds, ThreeDs::Challenge);
+    assert_eq!(auth("4242424242424242").three_ds, ThreeDs::Frictionless);
+    assert_eq!(auth("4000000000003238").three_ds, ThreeDs::Rejected);
+    assert_eq!(auth(PAN).card_last4, "1111");
+    let bad_cvv = AuthenticateRequest { transaction_id: "t".into(), amount: 100, currency: "INR".into(),
+                                        encrypted_cvv: Some(hsm().seal([3; 10], [4; 12], "cvv", b"12")),
+                                        encrypted_card_data: hsm().seal([1; 10], [2; 12], "data", PAN.as_bytes()) };
+    assert!(matches!(flow.authenticate(&bad_cvv), Err(FlowError::BadCardData(_))));
+}
+
 #[tokio::test]
 async fn http_api() {
     let host = Arc::new(MockHostConnector::new());

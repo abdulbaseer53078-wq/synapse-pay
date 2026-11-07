@@ -40,6 +40,7 @@ class TransactionBody(_Body):
     description: str | None = Field(default=None, max_length=512)
     metadata: dict[str, str] | None = None
     webhook_url: str | None = Field(default=None, pattern=r"^https://", max_length=2048)
+    payment_intent_id: str | None = Field(default=None, pattern=r"^pi_[0-9a-f]{32}$")  # since 1.3.0
 
 
 @router.post("", status_code=201)

@@ -62,3 +62,13 @@ def registry_caller(*merchant_scopes: str):
         raise Forbidden(f"access token lacks the {' or '.join(merchant_scopes)} or registry:admin scope")
 
     return dependency
+
+
+def merchant_from_api_key(request: Request, creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> UUID:
+    """Dependency: the merchant whose secret API key (Authorization: Bearer sk_...) made the request."""
+    if creds is None or not creds.credentials.startswith("sk_"):
+        raise Unauthenticated("a secret API key (Authorization: Bearer sk_...) is required")
+    merchant = request.app.state.api_keys.merchant_for(creds.credentials)
+    if merchant is None:
+        raise Unauthenticated("invalid or revoked API key")
+    return merchant
