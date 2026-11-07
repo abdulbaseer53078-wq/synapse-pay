@@ -42,8 +42,8 @@ def database_url():
 @pytest.fixture
 def db(database_url):
     with psycopg.connect(database_url, autocommit=True) as conn:
-        conn.execute("TRUNCATE merchants, terminals, certificates, heartbeats,"
-                     " registration_tokens, activation_challenges, audit_log, certification_profiles CASCADE")
+        conn.execute("TRUNCATE merchants, terminals, certificates, heartbeats, registration_tokens,"
+                     " activation_challenges, audit_log, certification_profiles, transactions, idempotency_keys CASCADE")
         yield conn
 
 
