@@ -8,7 +8,8 @@ from app.application.methods import (AdapterUnavailable, InvalidMethodDetails, M
                                      MethodRequest, MethodResult, OutcomeUnknown, UnsupportedOperation)
 from app.application.transactions import (BadCardData, CardOutcomeUnknown, CardResult, CardServiceUnavailable, Claim,
                                           IntentNotPayable, TransactionService)
-from app.infrastructure.methods.card import CardMethodAdapter, CardDetails, acquirer_ids
+from app.infrastructure.methods.base import BaseMethodAdapter
+from app.infrastructure.methods.card import CARD_CAPABILITIES, CardMethodAdapter, CardDetails, acquirer_ids
 
 TERMINAL, MERCHANT = uuid4(), uuid4()
 
@@ -244,3 +245,102 @@ def test_card_failures_are_translated_to_the_shared_vocabulary(raised, expected)
 def test_unbuilt_contract_calls_say_so(call):
     with pytest.raises(UnsupportedOperation):
         call(CardMethodAdapter(_Processor()))
+
+
+# --- the base adapter (Task 8.3) ------------------------------------------------------------------------
+
+class _BaseAdapter(BaseMethodAdapter):
+    method = "TEST"
+    CAPABILITIES = CARD_CAPABILITIES
+
+    def __init__(self, result=None, raises=None):
+        self.result = result or MethodResult(status="AUTHORIZED")
+        self.raises = raises
+
+    def send(self, request):
+        if self.raises:
+            raise self.raises
+        return self.result
+
+
+class _Boom(RuntimeError):
+    pass
+
+
+def test_unmapped_processor_errors_become_retryable_unavailable():
+    adapter = _BaseAdapter(raises=_Boom("socket closed"))
+    with pytest.raises(AdapterUnavailable) as raised:
+        adapter.initiate(MethodRequest(uuid4(), 100, "INR", "AUTO", MERCHANT, TERMINAL, {}))
+    assert "nothing was charged" in raised.value.message
+    assert isinstance(raised.value.__cause__, _Boom)  # the original is chained for the logs
+
+
+def test_mapped_processor_errors_use_the_shared_vocabulary():
+    class Down(Exception):
+        pass
+
+    class Mapped(_BaseAdapter):
+        ERROR_MAP = {Down: lambda exc: InvalidMethodDetails(f"declined: {exc}")}
+
+    with pytest.raises(InvalidMethodDetails, match="declined: nope"):
+        Mapped(raises=Down("nope")).initiate(
+            MethodRequest(uuid4(), 100, "INR", "AUTO", MERCHANT, TERMINAL, {}))
+
+
+@pytest.mark.parametrize("raised", [InvalidMethodDetails("already ours"), OutcomeUnknown()])
+def test_our_own_errors_are_not_re_wrapped(raised):
+    with pytest.raises(type(raised)):
+        _BaseAdapter(raises=raised).initiate(MethodRequest(uuid4(), 100, "INR", "AUTO", MERCHANT, TERMINAL, {}))
+
+
+def test_an_adapter_returning_the_wrong_type_fails_loudly():
+    adapter = _BaseAdapter()
+    adapter.result = {"status": "AUTHORIZED"}  # a bug, not a payment
+    with pytest.raises(TypeError, match="not MethodResult"):
+        adapter.initiate(MethodRequest(uuid4(), 100, "INR", "AUTO", MERCHANT, TERMINAL, {}))
+
+
+def test_validate_uses_the_declared_model_and_normalises():
+    class Modelled(_BaseAdapter):
+        DETAILS = CardDetails
+
+    adapter = Modelled()
+    assert adapter.validate(VALID) == VALID
+    with pytest.raises(InvalidMethodDetails) as raised:
+        adapter.validate({"card_expiry": "12/29"})
+    assert "method_details.encrypted_card_data" in raised.value.message
+
+
+def test_validate_without_a_model_passes_details_through():
+    details = {"anything": "goes"}
+    assert _BaseAdapter().validate(details) == details
+
+
+def test_idempotency_is_enforced_by_the_engine_not_the_adapter():
+    """The requirement behind Task 8.3, at the layer that can actually guarantee it: the engine claims the key
+    before the adapter is reached, so a replay never reaches the network twice."""
+    class ReplayRepo(_Repo):
+        def __init__(self):
+            super().__init__()
+            self.first = None
+
+        def claim(self, txn):
+            self.claims += 1
+            if self.first is None:
+                self.first = uuid4()
+                return Claim(transaction_id=self.first)
+            return Claim(replay={"transaction_id": f"txn_{self.first.hex}", "status": "AUTHORIZED",
+                                 "replayed": True})
+
+    adapter = _Adapter("CARD", MethodResult(status="AUTHORIZED"))
+    repo = ReplayRepo()
+    service = TransactionService(repo, _Auth(), MethodRegistry([adapter]))
+    body = _body("CARD", {})
+
+    first = service.create(TERMINAL, body)
+    second = service.create(TERMINAL, body)  # same idempotency_key
+
+    assert first["status"] == "AUTHORIZED"
+    assert second.get("replayed") is True
+    assert len(adapter.initiated) == 1  # the network was touched once
+    assert repo.claims == 2  # the key was checked both times, by the engine
