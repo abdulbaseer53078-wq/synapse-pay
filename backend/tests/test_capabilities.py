@@ -28,7 +28,7 @@ def _capabilities(method="UPI", **overrides) -> CapabilityDescriptor:
     base = dict(
         payment_method=method, supports_chargeback=False, supports_recurring=False, supports_offline=False,
         supports_refund=True, supports_partial_refund=False, supports_partial_capture=False,
-        settlement_timeline="instant", auth_type="vpa_collect",
+        settlement_timeline="instant", auth_type="vpa_collect", is_synchronous=False,
         dispute_rules=DisputeRules("NPCI_UPI", 30, 30),
         transitions=(Transition("PENDING", "SETTLED"),))
     return CapabilityDescriptor(**{**base, **overrides})
@@ -80,6 +80,7 @@ def test_card_capabilities_match_the_spec_example():
         "supports_partial_capture": True,
         "settlement_timeline": "T+1",
         "auth_type": "issuer_authorization",
+        "is_synchronous": True,
         "dispute_rules": {"framework": "CARD_SCHEME", "dispute_window_days": 120,
                           "resolution_timeline_days": 45},
         "transitions": [
