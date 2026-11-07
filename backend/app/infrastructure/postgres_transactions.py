@@ -195,6 +195,10 @@ class PostgresTransactionRepository:
                  result.bin if result else None, result.last4 if result else None,
                  result.reversal if result else None, transaction_id)).fetchone()
             response = _response(row[:12])
+            if result and result.next_action:
+                # The SDK opens this URL; it is part of the response, and therefore of the stored idempotent
+                # replay, so a retry returns the same redirect instead of starting a second payment.
+                response["next_action"] = result.next_action
             merchant_id, idempotency_key, intent_id, webhook_url = row[12], row[1], row[13], row[14]
             if intent_id is not None:
                 response["payment_intent_id"] = f"pi_{intent_id.hex}"

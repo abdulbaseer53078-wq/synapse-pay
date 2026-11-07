@@ -4,9 +4,9 @@ Wallets differ from cards and UPI in where the money is: it already sits in the 
 closed-loop transfer the provider performs. That makes the tokenised flow a **direct debit** — one server-to-
 server call, settled on the spot — and the redirect flow a hand-off to the provider's own UI.
 
-This step implements the direct debit, which is what the frozen contract models.
 
-## Why not the redirect flow yet
+
+## The redirect flow (spec 1.7.0)
 
 The brief's DoD asks `initiate()` to return a `redirect_url` to the SDK. The contract cannot express that today:
 
@@ -55,7 +55,7 @@ that is a deliberate step with its own threat model.
 
 ## Not done
 
-- **Webhook route** (`POST /api/v1/webhooks/wallet`). The handler is provider-generic in behaviour but named for
+- **Webhook route** (`POST /api/v1/webhooks/wallet`) - still open. The handler is provider-generic in behaviour but named for
   UPI; a second provider is exactly when to generalise it, and the route needs the 1.7.0 decision above anyway.
 - **Polling fallback** for wallet payments — the same `stale_pending` machinery, with `WALLET_URL` in the job.
 - **Partial refunds and auto-debit mandates**, both false in the descriptor.

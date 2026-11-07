@@ -111,6 +111,8 @@ class MethodResult:
     reversal: str = "NOT_NEEDED"
     bin: str | None = None  # instrument display data, when the method has an instrument
     last4: str | None = None
+    # Present when the customer must finish elsewhere (wallet login, 3-D Secure): {"type", "url"}.
+    next_action: dict | None = None
 
     @property
     def retryable(self) -> bool:

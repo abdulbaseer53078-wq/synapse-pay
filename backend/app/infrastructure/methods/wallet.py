@@ -74,12 +74,12 @@ WALLET_ERRORS = {
 
 
 class WalletDetails(BaseModel):
-    """method_details for WALLET, matching the contract's WalletDetails (token required)."""
+    """method_details for WALLET (contract 1.7.0): token for a direct debit, absent for a redirect flow."""
 
     model_config = ConfigDict(extra="forbid")
 
     wallet_provider: Literal["PAYTM", "PHONEPE", "AMAZON_PAY"]
-    wallet_token: str = Field(min_length=1, max_length=4096)
+    wallet_token: str | None = Field(default=None, min_length=1, max_length=4096)
 
 
 class HttpWallet:
@@ -88,6 +88,20 @@ class HttpWallet:
 
     def close(self) -> None:
         self.client.close()
+
+    def pay(self, amount: int, currency: str, merchant_transaction_id: str) -> dict:
+        """The redirect flow: the provider answers with its own URL for the customer to authorise at."""
+        try:
+            response = self.client.post("/wallet/v1/pay", json={
+                "amount": amount, "currency": currency, "merchant_transaction_id": merchant_transaction_id})
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise WalletUnavailable(
+                f"the wallet provider did not answer ({type(exc).__name__}); nothing was charged") from exc
+        if response.status_code >= 500:
+            raise WalletUnavailable(f"the wallet provider answered {response.status_code}; nothing was confirmed")
+        if response.status_code >= 400:
+            raise self._declined(response)
+        return response.json()
 
     def debit(self, wallet_token: str, amount: int, currency: str, merchant_transaction_id: str) -> dict:
         try:
@@ -137,9 +151,16 @@ class WalletMethodAdapter(BaseMethodAdapter):
         self.provider = provider
 
     def send(self, request: MethodRequest) -> MethodResult:
+        token = request.details.get("wallet_token")
+        if not token:
+            # First-time customer: hand them to the provider's UI. PENDING until its webhook (Step 12b).
+            reply = self.provider.pay(amount=request.amount, currency=request.currency,
+                                      merchant_transaction_id=str(request.transaction_id))
+            return MethodResult(status="PENDING", method_reference=reply.get("wallet_transaction_id"),
+                                next_action={"type": "WALLET_REDIRECT", "url": reply["action_url"]})
         try:
             reply = self.provider.debit(
-                wallet_token=request.details["wallet_token"], amount=request.amount,
+                wallet_token=token, amount=request.amount,
                 currency=request.currency, merchant_transaction_id=str(request.transaction_id))
         except WalletDeclined as declined:
             return MethodResult(status="FAILED", error={

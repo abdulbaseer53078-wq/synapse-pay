@@ -32,6 +32,11 @@ class FakeWallet:
         self.debits.append({"token": wallet_token, "amount": amount, "ref": merchant_transaction_id})
         return {"wallet_transaction_id": "wal_1", "status": "SUCCESS"}
 
+    def pay(self, amount, currency, merchant_transaction_id):
+        self.debits.append({"token": None, "amount": amount, "ref": merchant_transaction_id})
+        return {"wallet_transaction_id": "wal_redirect", "status": "PENDING",
+                "action_url": "https://wallet.example/checkout/wal_redirect"}
+
     def status(self, wallet_transaction_id):
         self.statuses.append(wallet_transaction_id)
         return {"wallet_transaction_id": wallet_transaction_id, "status": self.next_status}
@@ -55,10 +60,13 @@ def test_wallet_descriptor_has_no_partial_refunds_or_chargebacks():
 
 # --- validation -----------------------------------------------------------------------------------------
 
-def test_the_spec_requires_a_token():
+def test_the_spec_requires_a_provider_but_not_a_token():
+    """1.7.0: a token means direct debit; its absence means redirect to the provider."""
+    adapter = WalletMethodAdapter(FakeWallet())
+    assert adapter.validate({"wallet_provider": "PAYTM"}) == {"wallet_provider": "PAYTM"}
     with pytest.raises(InvalidMethodDetails) as raised:
-        WalletMethodAdapter(FakeWallet()).validate({"wallet_provider": "PAYTM"})
-    assert "method_details.wallet_token" in raised.value.message
+        adapter.validate({"wallet_token": "t"})
+    assert "method_details.wallet_provider" in raised.value.message
 
 
 @pytest.mark.parametrize("details", [
@@ -136,6 +144,17 @@ class _Repo:
 class _Auth:
     def authorize(self, terminal_id, method, amount):
         return SimpleNamespace(reason=None, profile=None)
+
+
+def test_a_first_time_customer_gets_a_redirect_instead_of_a_token():
+    """The 1.7.0 flow: no token, so the response carries next_action and the SDK opens it."""
+    wallet = FakeWallet()
+    result = WalletMethodAdapter(wallet).initiate(_request({"wallet_provider": "PAYTM"}))
+
+    assert result.status == "PENDING"
+    assert result.next_action == {"type": "WALLET_REDIRECT",
+                                  "url": "https://wallet.example/checkout/wal_redirect"}
+    assert result.method_reference == "wal_redirect"
 
 
 def test_the_engine_routes_wallet_and_settles():
