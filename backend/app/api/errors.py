@@ -5,9 +5,11 @@ from fastapi.responses import JSONResponse
 
 from app.application.registration import (CertificateAuthorityUnavailable, Conflict, Forbidden, InvalidInput,
                                           NotFound, RegistrationError, Unauthenticated, UnknownReference)
+from app.application.methods import (AdapterUnavailable, CapabilityNotSupported, InvalidMethodDetails,
+                                     MethodNotSupported)
 from app.application.payment_intents import IntentConflict, IntentNotConfirmable
 from app.application.transactions import (BadCardData, CardServiceUnavailable, IdempotencyConflict, IntentNotPayable,
-                                          MerchantMismatch, MethodNotSupported, StillProcessing)
+                                          MerchantMismatch, StillProcessing)
 
 _HTTP = {
     InvalidInput: (400, "VALIDATION_ERROR"),
@@ -22,6 +24,9 @@ _HTTP = {
     CardServiceUnavailable: (503, "SYSTEM_ERROR"),
     BadCardData: (400, "VALIDATION_ERROR"),
     MethodNotSupported: (422, "VALIDATION_ERROR"),
+    InvalidMethodDetails: (400, "VALIDATION_ERROR"),
+    AdapterUnavailable: (503, "SYSTEM_ERROR"),
+    CapabilityNotSupported: (422, "VALIDATION_ERROR"),
     MerchantMismatch: (422, "VALIDATION_ERROR"),
     IntentNotPayable: (409, "VALIDATION_ERROR"),
     IntentConflict: (409, "VALIDATION_ERROR"),
