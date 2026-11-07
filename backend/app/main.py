@@ -9,12 +9,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import ConnectionPool
 
-from app.api import audit, capabilities, errors, gateway, payment_intents, terminals, transactions, upi_webhooks
+from app.api import (audit, capabilities, errors, gateway, payment_intents, region, terminals, transactions,
+                     upi_webhooks)
 from app.application.audit import AuditQueryService
 from app.application.authorization import AuthorizationService
 from app.application.hosts import CachedHealth, HealthRegistry
 from app.application.methods import MethodRegistry
 from app.application.queries import TerminalQueryService
+from app.application.region_health import RegionHealth
 from app.application.registration import RegistrationService
 from app.application.payment_intents import CheckoutCardProcessor, PaymentIntentService
 from app.application.routing import InMemoryRules, RoutingEngine, RoutingRule
@@ -23,6 +25,7 @@ from app.application.transactions import TransactionService
 from app.application.upi_webhooks import WebhookHandler
 from app.config import Settings
 from app.infrastructure.config_certification import ConfigCertificationRegistry
+from app.infrastructure.aws_private_ca import AwsPrivateCertificateAuthority
 from app.infrastructure.file_ca import FileCertificateAuthority
 from app.infrastructure.methods.card import CardMethodAdapter
 from app.infrastructure.methods.offline import OfflineMethodAdapter
@@ -33,6 +36,7 @@ from app.infrastructure.upi_client import HttpUpiPsp
 from app.infrastructure.card_service_client import HttpCardProcessor
 from app.infrastructure.postgres_api_keys import PostgresApiKeys
 from app.infrastructure.postgres_audit import PostgresAuditStore
+from app.infrastructure.postgres_health import database_writable
 from app.infrastructure.postgres_intents import PostgresIntentRepository
 from app.infrastructure.postgres_terminals import PostgresTerminalRepository
 from app.infrastructure.postgres_transactions import PostgresTransactionRepository
@@ -108,7 +112,10 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.state.jwt_public_key = settings.jwt_public_key
     repo = PostgresTerminalRepository(pool)
     certification = ConfigCertificationRegistry(settings.certified_firmware)
-    ca = FileCertificateAuthority(settings.ca_cert_path, settings.ca_key_path, settings.ca_crl_path)
+    if settings.ca_backend == "aws_pca":
+        ca = AwsPrivateCertificateAuthority(settings.aws_pca_arn, signing_algorithm=settings.aws_pca_signing_algorithm)
+    else:
+        ca = FileCertificateAuthority(settings.ca_cert_path, settings.ca_key_path, settings.ca_crl_path)
     app.state.registration = RegistrationService(repo, ca, settings.approved_models, certification)
     app.state.authorization = AuthorizationService(repo, certification)
     cards = cards or HttpCardProcessor(settings.card_service_url)
@@ -145,6 +152,8 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.state.queries = TerminalQueryService(repo)
     # Read-only: the chain is built by the audit-ingest job, never by a request.
     app.state.audit = AuditQueryService(PostgresAuditStore(pool))
+    # Step 17: what Route 53 probes. Up only if this region can take a payment: writable DB, a usable acquirer.
+    app.state.region_health = RegionHealth(database_writable(pool), health.snapshot)
     errors.install(app)
     app.include_router(terminals.router)
     app.include_router(transactions.router)
@@ -153,4 +162,5 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.include_router(audit.router)
     app.include_router(upi_webhooks.router)
     app.include_router(gateway.router)
+    app.include_router(region.router)
     return app

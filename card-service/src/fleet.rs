@@ -13,29 +13,28 @@
 //!   next host is tried; a host that answers with a decline is the answer, and retrying it elsewhere would only
 //!   ask the same question twice.
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use host_connector::pool::IsoHostPool;
+use host_connector::stan::StanSource;
 use host_connector::{BoxFuture, HostConnector, HostError, HostResponse, HostState, HostStatus, RequestContext,
                      Transaction};
 
 pub struct Fleet {
     pub pools: HashMap<String, Arc<IsoHostPool>>,
-    next_stan: AtomicU32,
+    stans: Arc<StanSource>,
 }
 
 impl Fleet {
-    pub fn new(pools: HashMap<String, Arc<IsoHostPool>>) -> Self {
-        Self { pools, next_stan: AtomicU32::new(1) }
+    /// `stans` must be the source the pools were started with (`IsoHostPool::start_with_stans`): then a
+    /// transaction's STAN can't collide with a pool's echo, and slots keep other card-service instances apart.
+    pub fn new(pools: HashMap<String, Arc<IsoHostPool>>, stans: Arc<StanSource>) -> Self {
+        Self { pools, stans }
     }
 
-    /// Same formatting as `IsoHostConnector::next_stan`, so a STAN minted here can never collide with one minted
-    /// by a connector: six digits, 1..=999_999.
     fn mint_stan(&self) -> String {
-        let value = self.next_stan.fetch_add(1, Ordering::Relaxed);
-        format!("{:06}", (value % 999_999) + 1)
+        self.stans.next()
     }
 }
 

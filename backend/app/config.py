@@ -58,15 +58,25 @@ class Settings:
     audit_s3_prefix: str = "audit"
     audit_retention_days: int = 1825  # five years, per RBI
     audit_alert_url: str = ""  # PagerDuty Events API v2 endpoint; empty disables alerting
+    # Step 17.4 — who signs terminal certificates. `file`: a key on local disk (development, one process only).
+    # `aws_pca`: AWS Private CA, shared by every instance in every region; the ca_*_path settings are unused.
+    ca_backend: str = "file"
+    aws_pca_arn: str = ""
+    aws_pca_signing_algorithm: str = "SHA256WITHECDSA"  # must match the CA's key: SHA256WITHRSA for an RSA CA
 
     @classmethod
     def from_env(cls) -> "Settings":
         models = json.loads(os.environ.get("APPROVED_MODELS", "null")) or DEFAULT_APPROVED_MODELS
+        ca_backend = os.environ.get("CA_BACKEND", "file")
+        if ca_backend not in ("file", "aws_pca"):
+            raise ValueError(f"CA_BACKEND must be file or aws_pca, not {ca_backend!r}")
+        # The file CA needs its key and CRL paths; with AWS Private CA they don't exist.
+        ca_path = (lambda name: Path(os.environ[name])) if ca_backend == "file" else (lambda name: Path(""))
         return cls(
             database_url=os.environ["DATABASE_URL"],
-            ca_cert_path=Path(os.environ["CA_CERT_PATH"]),
-            ca_key_path=Path(os.environ["CA_KEY_PATH"]),
-            ca_crl_path=Path(os.environ["CA_CRL_PATH"]),
+            ca_cert_path=ca_path("CA_CERT_PATH"),
+            ca_key_path=ca_path("CA_KEY_PATH"),
+            ca_crl_path=ca_path("CA_CRL_PATH"),
             jwt_public_key=Path(os.environ["JWT_PUBLIC_KEY_PATH"]).read_text(),
             approved_models={name: re.compile(pattern) for name, pattern in models.items()},
             certified_firmware=_certified(
@@ -89,4 +99,7 @@ class Settings:
             audit_s3_prefix=os.environ.get("AUDIT_S3_PREFIX", "audit"),
             audit_retention_days=int(os.environ.get("AUDIT_RETENTION_DAYS", "1825")),
             audit_alert_url=os.environ.get("AUDIT_ALERT_WEBHOOK_URL", ""),
+            ca_backend=ca_backend,
+            aws_pca_arn=os.environ["AWS_PCA_ARN"] if ca_backend == "aws_pca" else "",
+            aws_pca_signing_algorithm=os.environ.get("AWS_PCA_SIGNING_ALGORITHM", "SHA256WITHECDSA"),
         )

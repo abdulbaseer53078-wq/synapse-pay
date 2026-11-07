@@ -13,6 +13,7 @@
 //! | `HOST_POOL_SIZE` | connections to the host, default 4 |
 //! | `HOST_TIMEOUT_MS` | how long each host gets to answer, default 1500 |
 //! | `AUDIT_LOG_PATH` | JSON Lines file for redacted ISO 8583 audit records (required) |
+//! | `STAN_INSTANCE`, `STAN_INSTANCES` | this process's STAN slot, unique across every card-service in every region; default 0 of 1 |
 //!
 //! In fleet mode every host reads `<ID>_ADDR` (required). The shared `HOST_SERVER_NAME`, `HOST_CA`,
 //! `HOST_CLIENT_CERT`, `HOST_CLIENT_KEY`, `HOST_DIALECT` and `HOST_POOL_SIZE` apply to every host, and
@@ -36,6 +37,7 @@ use host_connector::framing::{Framing, LengthHeader};
 use host_connector::iso_host::IsoHostConfig;
 use host_connector::link::LinkConfig;
 use host_connector::pool::{IsoHostPool, PoolConfig};
+use host_connector::stan::StanSource;
 use host_connector::HostConnector;
 use iso8583::Dictionary;
 
@@ -91,7 +93,7 @@ fn host_pool_size(prefix: Option<&str>) -> usize {
 
 /// Builds one acquirer's link and ISO 8583 settings and starts its pool. The audit sink is shared: one JSON
 /// Lines file is the record of every message to every acquirer, and `JsonLines` serialises its own writes.
-fn start_pool(host: &str, prefix: Option<&str>, audit: Arc<dyn AuditSink>) -> IsoHostPool {
+fn start_pool(host: &str, prefix: Option<&str>, audit: Arc<dyn AuditSink>, stans: Arc<StanSource>) -> IsoHostPool {
     let addr = host_var_or_fail(prefix, "ADDR", host);
     let server_name = host_var_or_fail(prefix, "SERVER_NAME", host);
     let ca = host_var_or_fail(prefix, "CA", host);
@@ -107,7 +109,7 @@ fn start_pool(host: &str, prefix: Option<&str>, audit: Arc<dyn AuditSink>) -> Is
     let mut iso = IsoHostConfig::new(dictionary, Framing { header: LengthHeader::Binary2, max_len: 8_192 });
     iso.audit = Some(audit);
     let link = LinkConfig::new(addr, server_name, ca, client_cert, client_key);
-    IsoHostPool::start(link, iso, PoolConfig { size: host_pool_size(prefix), ..PoolConfig::default() })
+    IsoHostPool::start_with_stans(link, iso, PoolConfig { size: host_pool_size(prefix), ..PoolConfig::default() }, stans)
         .unwrap_or_else(|e| fail(&format!("host link for {host}: {e}")))
 }
 
@@ -129,12 +131,16 @@ async fn main() {
         .unwrap_or_else(|e| fail(&format!("AUDIT_LOG_PATH: {e}")));
     let audit: Arc<dyn AuditSink> = Arc::new(JsonLines::new(audit_file));
 
+    // Two card-services with the same slot would send the acquirer duplicate STANs: every deployment must give
+    // each running instance its own STAN_INSTANCE (infra/ecs does, per region).
+    let stans = Arc::new(StanSource::new(number("STAN_INSTANCE", 0), number("STAN_INSTANCES", 1))
+        .unwrap_or_else(|e| fail(&e)));
     let mut pools = HashMap::new();
     let hosts = optional("HOSTS").unwrap_or_default();
     if hosts.trim().is_empty() {
         // Single-host fallback: the e2e baseline and every existing deployment keep this exact shape.
         let acquirer_id = env::var("ACQUIRER_ID").unwrap_or_else(|_| "acquirer_a".to_string());
-        let pool = start_pool(&acquirer_id, None, audit.clone());
+        let pool = start_pool(&acquirer_id, None, audit.clone(), stans.clone());
         pools.insert(acquirer_id, Arc::new(pool));
     } else {
         for raw in hosts.split(',') {
@@ -150,7 +156,7 @@ async fn main() {
             let prefix: String = host.chars()
                 .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
                 .collect();
-            let pool = start_pool(host, Some(&prefix), audit.clone());
+            let pool = start_pool(host, Some(&prefix), audit.clone(), stans.clone());
             pools.insert(host.to_string(), Arc::new(pool));
         }
         if pools.is_empty() {
@@ -164,7 +170,7 @@ async fn main() {
     }
 
     let timeouts = Timeouts { host: Duration::from_millis(number("HOST_TIMEOUT_MS", 1_500)), ..Timeouts::default() };
-    let fleet = Arc::new(Fleet::new(pools));
+    let fleet = Arc::new(Fleet::new(pools, stans));
     // The fleet *is* the host connector: one host or five, CardFlow calls the same trait method.
     let host: Arc<dyn HostConnector> = fleet.clone();
     let flow = CardFlow { hsm: Arc::new(hsm), host, timeouts };

@@ -18,6 +18,7 @@ use host_connector::framing::{Framing, LengthHeader};
 use host_connector::iso_host::IsoHostConfig;
 use host_connector::link::LinkConfig;
 use host_connector::pool::{IsoHostPool, PoolConfig};
+use host_connector::stan::StanSource;
 use host_connector::{Card, Decision, HostConnector, RequestContext, Transaction, TransactionKind};
 use iso8583::{pack, unpack, Dictionary, Iso8583Message};
 use rcgen::{BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair};
@@ -116,8 +117,7 @@ async fn host(ca: &Ca, delay: Duration) -> (String, Arc<HostStats>) {
                 loop {
                     let Ok(n @ 1..) = reader.read(&mut chunk).await else { return };
                     buf.extend_from_slice(&chunk[..n]);
-                    loop {
-                        let Ok(Some((frame, used))) = FRAMING.decode(&buf) else { break };
+                    while let Ok(Some((frame, used))) = FRAMING.decode(&buf) {
                         let Ok(request) = unpack(frame, &dictionary) else { return };
                         let is_echo = request.mti() == "0800";
                         if !is_echo {
@@ -128,7 +128,6 @@ async fn host(ca: &Ca, delay: Duration) -> (String, Arc<HostStats>) {
                         if writer.write_all(&reply).await.is_err() {
                             return; // the card service gave up and closed the socket: a late reply goes nowhere
                         }
-                        let used = used;
                         buf.drain(..used);
                     }
                 }
@@ -175,7 +174,7 @@ async fn test_late_reply_is_discarded() {
     let mut pools = HashMap::new();
     pools.insert("acquirer_a".to_string(), Arc::new(pool(a_addr, &credentials, audit.clone())));
     pools.insert("acquirer_b".to_string(), Arc::new(pool(b_addr, &credentials, audit.clone())));
-    let fleet = Fleet::new(pools);
+    let fleet = Fleet::new(pools, Arc::new(StanSource::single()));
     for pool in fleet.pools.values() {
         assert_eq!(pool.wait_ready(Duration::from_secs(5)).await, 1);
     }

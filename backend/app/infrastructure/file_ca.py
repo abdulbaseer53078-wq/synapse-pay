@@ -4,13 +4,12 @@ from pathlib import Path
 from uuid import UUID
 
 from cryptography import x509
-from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from app.application.registration import CertificateAuthorityUnavailable, InvalidInput, IssuedCertificate
+from app.application.registration import CertificateAuthorityUnavailable, IssuedCertificate
 from app.domain.terminal import terminal_uri
+from app.infrastructure.csr import validated_csr, verify_signature
 
 PEM = serialization.Encoding.PEM
 CRL_LIFETIME = timedelta(days=1)  # verifiers reject a stale CRL, so it must be re-signed within this window
@@ -57,16 +56,7 @@ class FileCertificateAuthority:
         os.replace(tmp, self._crl_path)  # atomic: readers never see a half-written CRL
 
     def issue(self, csr_pem: str, terminal_id: UUID) -> IssuedCertificate:
-        try:
-            csr = x509.load_pem_x509_csr(csr_pem.encode())
-        except ValueError:
-            raise InvalidInput("csr_pem is not a valid PEM certificate signing request")
-        if not csr.is_signature_valid:
-            raise InvalidInput("CSR signature is invalid")
-        key = csr.public_key()
-        if not (isinstance(key, ec.EllipticCurvePublicKey) and isinstance(key.curve, ec.SECP256R1)
-                or isinstance(key, rsa.RSAPublicKey) and key.key_size >= 2048):
-            raise InvalidInput("CSR key must be EC P-256 or RSA of at least 2048 bits")
+        key = validated_csr(csr_pem).public_key()
 
         # The subject and extensions come from the registry, never from the CSR.
         now = datetime.now(UTC)
@@ -98,12 +88,4 @@ class FileCertificateAuthority:
         )
 
     def verify_signature(self, public_key_pem: str, message: bytes, signature: bytes) -> bool:
-        key = serialization.load_pem_public_key(public_key_pem.encode())
-        try:
-            if isinstance(key, ec.EllipticCurvePublicKey):
-                key.verify(signature, message, ec.ECDSA(hashes.SHA256()))
-            else:
-                key.verify(signature, message, padding.PKCS1v15(), hashes.SHA256())
-        except InvalidSignature:
-            return False
-        return True
+        return verify_signature(public_key_pem, message, signature)

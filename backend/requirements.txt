@@ -6,6 +6,7 @@ PyJWT==2.15.1
 uvicorn==0.54.0
 confluent-kafka==2.16.1
 tzdata==2026.6  # time zone data for zoneinfo on Windows
+boto3==1.40.70  # AWS Private CA (CA_BACKEND=aws_pca) and S3 Object Lock audit storage
 # tests
 pytest==9.2.0
 httpx==0.28.1
