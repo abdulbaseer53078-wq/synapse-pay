@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Verify your payment</title>
+  <link rel="stylesheet" href="/checkout/card-frame.css">
+</head>
+<body>
+  <form id="otp-form" style="padding:16px;max-width:360px;margin:auto">
+    <p><strong>Sandbox bank</strong> · test mode</p>
+    <p>Pay <strong>₹{{AMOUNT}}</strong> with the card ending <strong>{{LAST4}}</strong>.</p>
+    <label for="otp">One-time password sent to your phone</label>
+    <input id="otp" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+    <p style="color:var(--muted);font-size:13px">In the sandbox, the OTP is 123456.</p>
+    <p><button id="submit" type="submit">Verify and pay</button> <button id="cancel" type="button">Cancel</button></p>
+    <p id="error" role="alert"></p>
+  </form>
+  <script src="/checkout/acs.js"></script>
+</body>
+</html>
