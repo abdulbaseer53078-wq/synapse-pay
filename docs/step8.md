@@ -57,21 +57,60 @@ Moving `CardDetails` out of `api/transactions.py` is what removed the last `if b
 from the HTTP layer: the endpoint now passes `method_details` through and the adapter decides what a valid one
 looks like.
 
+## Base adapter (Task 8.3)
+
+`backend/app/infrastructure/methods/base.py`. A rail implements **one** method:
+
+```python
+class UpiMethodAdapter(BaseMethodAdapter):
+    method = "UPI"
+    CAPABILITIES = UPI_CAPABILITIES
+    DETAILS = UpiDetails                      # pydantic shape of method_details
+    ERROR_MAP = {                             # the PSP's vocabulary → ours
+        PspTimeout: lambda exc: AdapterUnavailable("the PSP did not answer; nothing was charged"),
+        PspRejected: lambda exc: InvalidMethodDetails(exc.message),
+    }
+
+    def send(self, request: MethodRequest) -> MethodResult: ...   # the only code a rail must write
+```
+
+The base supplies `capabilities()`, `validate()` from `DETAILS`, the `initiate()` template, and defaults for
+every call the rail has not built. The template does three things worth naming:
+
+1. **Translation.** Anything unmapped from `send()` becomes `AdapterUnavailable` — retryable, "nothing was
+   charged" — instead of escaping as a 500. An adapter bug should not look like a client error.
+2. **Pass-through.** Errors already in the adapter vocabulary are not re-wrapped. This had to be an explicit
+   list, not `RegistrationError`: the card service's own exceptions *are* `RegistrationError` subclasses, so
+   catching the base class let them through untranslated. Caught by `test_card_failures_are_translated…`.
+3. **Type safety.** `send()` returning anything but a `MethodResult` raises `TypeError` immediately — a bug,
+   not a payment outcome.
+
+### Two things the base class deliberately does not do
+
+**Idempotency.** The engine claims the key in one transaction *before* the adapter is reached, and replays the
+stored response on a repeat. An adapter doing it too would either double-charge or need database access an
+adapter must not have. `test_idempotency_is_enforced_by_the_engine_not_the_adapter` drives two identical
+requests through the real engine and asserts the adapter was called once.
+
+**Audit.** `audit_log` is written by the repository inside the transaction that changes the state — that is
+what makes the outbox ordering correct. An adapter runs outside that transaction, so an audit row written from
+there could commit while the transaction rolled back, recording a payment that never happened. Adapters
+describe what they did (`MethodResult` carries the network reference, BIN and last four); the engine persists it.
+
 ## Adding a method
 
 ```python
-class UpiMethodAdapter:
-    method = "UPI"
+class FakeMethodAdapter(BaseMethodAdapter):
+    method = "FAKE"
+    CAPABILITIES = FAKE_CAPABILITIES
 
-    def validate(self, details: dict) -> dict: ...      # needs a VPA
-    def initiate(self, request: MethodRequest) -> MethodResult: ...
-    # capture/refund/status/handle_webhook as the rail allows
+    def send(self, request): return MethodResult(status="AUTHORIZED")
 ```
 
 Then, in `main.py`:
 
 ```python
-methods = MethodRegistry([CardMethodAdapter(cards), UpiMethodAdapter(psp_client)])
+methods = MethodRegistry([CardMethodAdapter(cards), FakeMethodAdapter()])
 ```
 
 Nothing else. `test_a_new_method_needs_no_engine_change` in `tests/test_methods.py` is that promise as an
@@ -132,7 +171,8 @@ cd backend && pytest tests/test_methods.py tests/test_capabilities.py
 20 cases in `test_methods.py`, no database: registry lookup and duplicate detection, unknown method rejected
 before anything is claimed, a second method working through the unchanged engine, the three failure
 translations, validation before the idempotency claim, field-path messages that never echo card data, and every
-unbuilt call raising `UnsupportedOperation`.
+unbuilt call raising `UnsupportedOperation` — plus the base adapter's translation, pass-through, type check,
+model validation and the idempotency property.
 
 13 more in `test_capabilities.py`: the descriptor against the frozen example, `supports()` name handling, the
 capability guard refusing partial refunds and chargebacks without calling the adapter, and the endpoint's auth
