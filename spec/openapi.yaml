@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.5.0
+  version: 1.6.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
     goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions.
@@ -604,6 +604,64 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         5XX: { $ref: '#/components/responses/Error' }
+  /v1/webhooks/upi:
+    post:
+      operationId: upiWebhook
+      summary: PSP/NPCI callback for a UPI payment (public; HMAC-authenticated)
+      description: >-
+        Public endpoint a PSP posts the final status of a collect to. Authentication is the HMAC-SHA256
+        signature over "<X-UPI-Timestamp>.<raw body>" carried in X-UPI-Signature — not a bearer token and not a
+        client certificate, because a payment network is neither a merchant nor a terminal. Requests whose
+        timestamp is more than 300 seconds from server time are rejected. Delivery is at-least-once, so
+        event_id deduplicates: a repeat is acknowledged with 200 and changes nothing. A correctly signed
+        callback is answered 200 even when the payment is unknown, so the provider stops retrying; exceptions
+        to that are logged, not retried.
+      security: []
+      parameters:
+        - name: X-UPI-Timestamp
+          in: header
+          required: true
+          description: Unix seconds the provider signed with. Must be within 300s of server time.
+          schema: { type: string, pattern: '^[0-9]+$' }
+        - name: X-UPI-Signature
+          in: header
+          required: true
+          description: Lowercase hex HMAC-SHA256 of "<timestamp>.<raw body>".
+          schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [event_id, psp_transaction_id, status]
+              properties:
+                event_id:
+                  type: string
+                  maxLength: 128
+                  description: The provider's delivery id. Duplicates are acknowledged and ignored.
+                psp_transaction_id: { type: string, maxLength: 128 }
+                status: { type: string, enum: [SUCCESS, FAILURE] }
+                reason: { type: string, maxLength: 256 }
+                rrn: { type: string, maxLength: 32 }
+      responses:
+        '200':
+          description: Acknowledged — applied, a duplicate, or about a payment we do not know.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [received, duplicate, applied]
+                properties:
+                  received: { const: true }
+                  duplicate: { type: boolean }
+                  applied: { type: boolean }
+                  status: { type: [string, 'null'] }
+                  reason: { type: [string, 'null'] }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /v1/audit/events:
     get:
       operationId: listAuditEvents
