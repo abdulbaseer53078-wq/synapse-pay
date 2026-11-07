@@ -1007,6 +1007,7 @@ components:
           type: string
           enum:
             - INSUFFICIENT_FUNDS
+            - ISSUER_DECLINED
             - INVALID_VPA
             - HOST_TIMEOUT
             - INVALID_REQUEST
@@ -1016,7 +1017,10 @@ components:
             - TERMINAL_NOT_FOUND
             - MERCHANT_NOT_FOUND
             - INTERNAL_ERROR
-          description: Machine-readable code.
+          description: >-
+            Machine-readable code. ISSUER_DECLINED (since 1.1.0) covers issuer declines without a more
+            specific code; error_category says whether it's soft or hard. Values are added over time, so
+            clients must handle an unknown code by its error_category.
         error_message:
           type: string
           description: Human-readable description. Must never contain card data, tokens or other PII.

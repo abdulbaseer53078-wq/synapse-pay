@@ -1,0 +1,19 @@
+[package]
+name = "host_connector"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+publish = false
+
+[dependencies]
+# shortcut: path dependency inside the monorepo; switch to the git tag (iso8583-v1.1.0) if this crate moves out.
+iso8583 = { path = "../iso8583" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+socket2 = { version = "0.5", features = ["all"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+[dev-dependencies]
+rcgen = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread"] }
