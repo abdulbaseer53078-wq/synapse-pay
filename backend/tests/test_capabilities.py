@@ -75,9 +75,9 @@ def test_card_capabilities_match_the_spec_example():
         "supports_chargeback": True,
         "supports_recurring": True,
         "supports_offline": True,
-        "supports_refund": True,
-        "supports_partial_refund": True,
-        "supports_partial_capture": True,
+        "supports_refund": False,  # PR 4: until card-service can send refunds and completions
+        "supports_partial_refund": False,
+        "supports_partial_capture": False,
         "settlement_timeline": "T+1",
         "auth_type": "issuer_authorization",
         "is_synchronous": True,
@@ -90,12 +90,6 @@ def test_card_capabilities_match_the_spec_example():
             {"from": "AUTHORIZED", "to": "CAPTURED"},
             {"from": "AUTHORIZED", "to": "VOIDED"},
             {"from": "CAPTURED", "to": "SETTLED"},
-            {"from": "CAPTURED", "to": "REFUNDED"},
-            {"from": "CAPTURED", "to": "PARTIALLY_REFUNDED"},
-            {"from": "SETTLED", "to": "REFUNDED"},
-            {"from": "SETTLED", "to": "PARTIALLY_REFUNDED"},
-            {"from": "PARTIALLY_REFUNDED", "to": "PARTIALLY_REFUNDED"},
-            {"from": "PARTIALLY_REFUNDED", "to": "REFUNDED"},
         ],
     }
 

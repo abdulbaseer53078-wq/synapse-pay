@@ -156,7 +156,7 @@ async fn a_returning_customer_pays_with_only_the_token() {
     let host = Arc::new(MockHostConnector::new());
     let v = Arc::new(vault(Arc::new(MemoryStore::default()), false));
     let t = v.tokenize(save("m_1", VISA, "VISA", "08/28")).await.unwrap();
-    let flow = CardFlow { hsm: hsm(), host: host.clone(), timeouts: Timeouts::default(), vault: Some(v) };
+    let flow = CardFlow { hsm: hsm(), host: host.clone(), timeouts: Timeouts::default(), vault: Some(v), reversals: None };
 
     let result = flow.process(&token_request(&t.token, Some("m_1"))).await.unwrap();
     assert_eq!(result.outcome.status, Status::Captured);
@@ -191,7 +191,7 @@ async fn http_tokenize_index_and_revoke_never_return_the_card_or_its_ciphertext(
     let host = Arc::new(MockHostConnector::new());
     let store = Arc::new(MemoryStore::default());
     let flow = CardFlow { hsm: hsm(), host, timeouts: Timeouts::default(),
-                          vault: Some(Arc::new(vault(store.clone(), false))) };
+                          vault: Some(Arc::new(vault(store.clone(), false))), reversals: None };
     let app = card_service::http::app(Arc::new(AppState {
         flow,
         fleet: Arc::new(Fleet::new(Default::default(), Arc::new(host_connector::stan::StanSource::single()))),

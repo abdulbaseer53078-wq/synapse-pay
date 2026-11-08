@@ -42,6 +42,7 @@ TRANSACTION_FINISH_EVENTS = {
 TRANSACTION_EVENTS = {
     "transaction.create": "TRANSACTION_INITIATED",
     "transaction.send": "TRANSACTION_SUBMITTED",
+    "transaction.discrepancy": "TRANSACTION_DISCREPANCY_DETECTED",  # an illegal status change, refused
 }
 
 # Admin reads of the registry are audited too; they are events even though nothing changed.

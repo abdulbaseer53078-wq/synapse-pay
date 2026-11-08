@@ -63,8 +63,44 @@ def test_per_transaction_and_per_day_limits(api, cfg, clock):
         assert api.post(URL, json=request(cfg, amount=200_000)).status_code == 201
     assert api.post(URL, json=request(cfg, amount=1)).json()["error_code"] == "OFFLINE_LIMIT_EXCEEDED"
     assert api.post(URL, json=request(cfg, amount=1, terminal="TERM-2")).status_code == 201, "the limit is per terminal"
-    clock.advance(hours=13)  # past midnight in India
-    assert api.post(URL, json=request(cfg, amount=200_000)).status_code == 201
+    clock.advance(hours=13)  # past midnight in India: a calendar day would hand out a fresh 1,000,000 here
+    assert api.post(URL, json=request(cfg, amount=1)).json()["error_code"] == "OFFLINE_LIMIT_EXCEEDED", "rolling 24 h"
+
+
+def test_unsynced_sales_count_however_far_the_clock_moves(api, cfg, clock):
+    """F-06: the window frees only what the cloud has seen. Unsynced exposure counts whatever its timestamp."""
+    for _ in range(5):
+        assert api.post(URL, json=request(cfg, amount=200_000)).status_code == 201
+    clock.advance(hours=25)  # out of the window, but still unsynced
+    assert api.post(URL, json=request(cfg, amount=1)).json()["error_code"] == "OFFLINE_LIMIT_EXCEEDED"
+    conn = db.connect(cfg.db_path)
+    conn.execute("UPDATE offline_queue SET status = 'SYNCED'")
+    conn.close()
+    assert api.post(URL, json=request(cfg, amount=200_000)).status_code == 201, "synced and 24 h old: freed"
+
+
+def test_queued_items_form_a_signed_hash_chain(api, cfg, keys):
+    """F-06: each item quotes the one before it, so the cloud can see one dropped, reordered or replaced."""
+    for _ in range(3):
+        assert api.post(URL, json=request(cfg)).status_code == 201
+    items = [json.loads(row["payload_json"]) for row in queued(cfg)]
+    assert [i["edge_seq"] for i in items] == [1, 2, 3]
+    assert items[0]["prev_hash"] == ""
+    assert [i["prev_hash"] for i in items[1:]] == [crypto.chain_hash(i) for i in items[:2]]
+    assert all(crypto.verify(pem_public(keys["edge"]), i) for i in items)
+    assert not crypto.verify(pem_public(keys["edge"]), {**items[2], "edge_seq": 2}), "the chain fields are signed"
+
+
+def test_purging_synced_rows_never_breaks_the_chain(api, cfg):
+    assert api.post(URL, json=request(cfg)).status_code == 201
+    [first] = queued(cfg)
+    conn = db.connect(cfg.db_path)
+    conn.execute("DELETE FROM offline_queue")  # what the 30-day purge does to synced rows
+    conn.close()
+    assert api.post(URL, json=request(cfg)).status_code == 201
+    [second] = queued(cfg)
+    item = json.loads(second["payload_json"])
+    assert (item["edge_seq"], item["prev_hash"]) == (2, crypto.chain_hash(json.loads(first["payload_json"])))
 
 
 def test_idempotent_replay_and_conflict(api, cfg):

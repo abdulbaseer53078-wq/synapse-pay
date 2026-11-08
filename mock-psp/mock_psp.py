@@ -29,6 +29,7 @@ ACCOUNTS = {"asha@okhdfcbank": "Asha Menon", "ravi@okaxis": "Ravi Krishnan", "in
 
 _lock = threading.Lock()
 _collects: dict[str, dict] = {}
+_refunds: dict[str, dict] = {}  # by merchant_refund_id: the idempotency record
 _secret = "s3cret"
 
 
@@ -115,7 +116,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/psp/v1/refund":
             psp_id, amount = body.get("psp_transaction_id"), body.get("amount")
+            refund_key = body.get("merchant_refund_id")
             with _lock:
+                if refund_key and refund_key in _refunds:  # idempotent: a re-sent refund gets the first answer
+                    return self._send(200, _refunds[refund_key])
                 record = _collects.get(psp_id)
                 if record is None:
                     return self._send(404, {"error": {"code": "TRANSACTION_NOT_FOUND", "message": psp_id}})
@@ -123,11 +127,16 @@ class Handler(BaseHTTPRequestHandler):
                 if record["status"] != "SUCCESS":
                     return self._send(409, {"error": {"code": "NOT_SETTLED",
                                                       "message": "only a successful collect can be refunded"}})
-                if not isinstance(amount, int) or amount <= 0 or amount > record["amount"]:
+                left = record["amount"] - record.get("refunded", 0)
+                if not isinstance(amount, int) or amount <= 0 or amount > left:
                     return self._send(400, {"error": {"code": "BAD_REFUND",
-                                                      "message": "amount must be between 1 and the original"}})
-            return self._send(200, {"refund_id": f"rfnd_{uuid.uuid4().hex}", "psp_transaction_id": psp_id,
-                                    "amount": amount, "status": "SUCCESS"})
+                                                      "message": "amount must be between 1 and what is left"}})
+                record["refunded"] = record.get("refunded", 0) + amount
+                reply = {"refund_id": f"rfnd_{uuid.uuid4().hex}", "psp_transaction_id": psp_id, "amount": amount,
+                         "status": "SUCCESS"}
+                if refund_key:
+                    _refunds[refund_key] = reply
+            return self._send(200, reply)
 
         if self.path == "/mock/outcome":
             psp_id, status = body.get("psp_transaction_id"), body.get("status")

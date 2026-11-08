@@ -25,3 +25,34 @@ groups:
         labels: { severity: page }
         annotations:
           summary: "Backups saved under 95% of failed-over payments for 5 minutes"
+  # PR 10: the financial invariants. Every API instance reports the same database-read gauges, hence max().
+  - name: financial_critical
+    rules:
+      - alert: LedgerImbalanceDetected
+        # The whole ledger, recent entries one by one, and writes the code or the database refused.
+        expr: |
+          max(abs(synapse_ledger_imbalance_paise)) > 0
+            or max(synapse_ledger_unbalanced_entries) > 0
+            or sum(increase(synapse_ledger_imbalance_total[5m])) > 0
+        labels: { severity: page }
+        annotations:
+          summary: "CRITICAL: the ledger doesn't balance"
+          description: "Debits and credits differ, or a write breaking that was refused. Stop and investigate before money moves further."
+      - alert: LedgerProtectionDisabled
+        # Someone with database admin rights turned off the append-only or balance triggers: the prelude to tampering.
+        expr: max by (trigger) (synapse_ledger_protection_disabled) > 0
+        labels: { severity: page }
+        annotations:
+          summary: "CRITICAL: ledger trigger {{ $labels.trigger }} is disabled or missing"
+      - alert: StuckTransactionsHigh
+        expr: max by (kind) (synapse_stuck_transactions_current) > 10
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $value }} payments stuck {{ $labels.kind }} for over 5 minutes"
+          description: "The recovery sweep is behind, or a PSP or acquirer isn't answering."
+      - alert: EdgeOnHold
+        expr: max by (edge_node_id) (synapse_edge_on_hold) > 0
+        labels: { severity: page }
+        annotations:
+          summary: "Edge {{ $labels.edge_node_id }}'s offline queue failed its chain check; its sales are on hold"

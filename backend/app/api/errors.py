@@ -1,7 +1,11 @@
 """Renders every error in the spec's Error shape: error_code, error_message, error_category, retryable."""
 from fastapi import FastAPI, Request
+import psycopg
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
+from app.application import observability
+from app.domain.ledger import LedgerImbalance
 
 from app.application.registration import (CertificateAuthorityUnavailable, Conflict, Forbidden, InvalidInput,
                                           NotFound, RegistrationError, Unauthenticated, UnknownReference)
@@ -41,6 +45,21 @@ def error_response(status: int, code: str, category: str, message: str) -> JSONR
 
 
 def install(app: FastAPI) -> None:
+    @app.exception_handler(LedgerImbalance)
+    @app.exception_handler(psycopg.errors.RaiseException)
+    async def ledger_integrity(request: Request, exc: Exception) -> JSONResponse:
+        # Raised by the ledger's own checks or its database triggers (migration 016): the whole request rolled back,
+        # so no money moved, but it should never happen. Counted, paged, and refused without detail.
+        text = str(exc)
+        reason = ("imbalance" if isinstance(exc, LedgerImbalance) or "IMBALANCE" in text.upper()
+                  else "append_only" if "append-only" in text else "other")
+        observability.LEDGER_INTEGRITY_REFUSED.labels(reason).inc()
+        alerts = getattr(request.app.state, "ops_alerts", None)
+        if alerts:
+            alerts.ops_alert("CRITICAL: a ledger write was refused for breaking an invariant", "critical",
+                             {"reason": reason, "path": request.url.path})
+        return error_response(500, "INTERNAL_ERROR", "SYSTEM_ERROR", "the request was refused and rolled back")
+
     @app.exception_handler(RegistrationError)
     async def registration_error(_: Request, exc: RegistrationError) -> JSONResponse:
         status, category = _HTTP[type(exc)]

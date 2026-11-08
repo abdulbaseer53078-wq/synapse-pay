@@ -34,3 +34,38 @@ tests:
         exp_alerts:
           - exp_labels: { severity: page }
             exp_annotations: { summary: "Backups saved under 95% of failed-over payments for 5 minutes" }
+  - interval: 1m
+    input_series:
+      - series: 'synapse_ledger_imbalance_paise{instance="api-1"}'
+        values: '0 0 0 1 1'
+      - series: 'synapse_ledger_imbalance_paise{instance="api-2"}'
+        values: '0 0 0 1 1'
+      - series: 'synapse_ledger_unbalanced_entries{instance="api-1"}'
+        values: '0 0 0 0 0'
+      - series: 'synapse_ledger_protection_disabled{instance="api-1",trigger="ledger_postings_append_only"}'
+        values: '0 0 1 1 1'
+      - series: 'synapse_stuck_transactions_current{instance="api-1",kind="pending"}'
+        values: '0+3x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: LedgerImbalanceDetected
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: LedgerImbalanceDetected
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations:
+              summary: "CRITICAL: the ledger doesn't balance"
+              description: "Debits and credits differ, or a write breaking that was refused. Stop and investigate before money moves further."
+      - eval_time: 2m
+        alertname: LedgerProtectionDisabled
+        exp_alerts:
+          - exp_labels: { severity: page, trigger: ledger_postings_append_only }
+            exp_annotations: { summary: "CRITICAL: ledger trigger ledger_postings_append_only is disabled or missing" }
+      - eval_time: 10m
+        alertname: StuckTransactionsHigh
+        exp_alerts:
+          - exp_labels: { severity: page, kind: pending }
+            exp_annotations:
+              summary: "30 payments stuck pending for over 5 minutes"
+              description: "The recovery sweep is behind, or a PSP or acquirer isn't answering."

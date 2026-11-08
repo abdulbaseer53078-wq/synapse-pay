@@ -52,7 +52,8 @@ def db(database_url):
         conn.execute("TRUNCATE merchants, terminals, certificates, heartbeats, registration_tokens,"
                      " activation_challenges, audit_log, certification_profiles, transactions, idempotency_keys,"
                      " payment_intents, api_keys, webhook_deliveries, certifications, firmware_minimums,"
-                     " certification_runs CASCADE")
+                     " certification_runs, journal_entries, ledger_postings, refunds, settlement_files,"
+                     " reconciliation_runs, reconciliation_items, edge_sync_items, chargebacks, chargeback_events CASCADE")
         # Step 26: the simulated terminals' firmware, certified on every host the tests route to.
         certify_sandbox_firmware(conn, TEST_ACQUIRERS)
         yield conn

@@ -56,9 +56,11 @@ CARD_CAPABILITIES = CapabilityDescriptor(
     supports_chargeback=True,
     supports_recurring=True,
     supports_offline=True,  # the edge node accepts cards while the link is down
-    supports_refund=True,
-    supports_partial_refund=True,
-    supports_partial_capture=True,
+    # PR 4: false until card-service can send them (ISO 8583 refund and completion); the descriptor must not promise
+    # what the API can't do.
+    supports_refund=False,
+    supports_partial_refund=False,
+    supports_partial_capture=False,
     settlement_timeline="T+1",
     auth_type="issuer_authorization",
     is_synchronous=True,  # the issuer authorizes in-line: the API answers AUTHORIZED, not PENDING
@@ -70,12 +72,7 @@ CARD_CAPABILITIES = CapabilityDescriptor(
         Transition("AUTHORIZED", "CAPTURED"),
         Transition("AUTHORIZED", "VOIDED"),
         Transition("CAPTURED", "SETTLED"),
-        Transition("CAPTURED", "REFUNDED"),
-        Transition("CAPTURED", "PARTIALLY_REFUNDED"),
-        Transition("SETTLED", "REFUNDED"),
-        Transition("SETTLED", "PARTIALLY_REFUNDED"),
-        Transition("PARTIALLY_REFUNDED", "PARTIALLY_REFUNDED"),
-        Transition("PARTIALLY_REFUNDED", "REFUNDED"),
+        # Refund transitions return with card refunds (card-service follow-up to PR 4).
     ),
 )
 

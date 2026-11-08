@@ -5,8 +5,12 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from app.application.fees import ConfigFeePolicy, FeePolicy
 from app.application.payment_intents import Intent, NewIntent, public_intent_id
 from app.application.transactions import CardResult
+from app.domain.ledger import SALE_STATUSES
+from app.domain.state_machine import transition
+from app.infrastructure.postgres_ledger import post_sale_once
 from app.infrastructure.postgres_transactions import _audit_entity, _response, settle_intent
 from app.infrastructure.webhook_outbox import enqueue
 
@@ -20,8 +24,9 @@ def _intent(row: dict | None) -> Intent | None:
 
 
 class PostgresIntentRepository:
-    def __init__(self, pool: ConnectionPool):
+    def __init__(self, pool: ConnectionPool, fees: FeePolicy | None = None):
         self.pool = pool
+        self.fees = fees or ConfigFeePolicy({})  # no rates configured: no fee
 
     def create(self, new: NewIntent) -> tuple[Intent, bool]:
         """Returns (intent, created). An existing intent with the same key is returned with created=False; the
@@ -116,17 +121,31 @@ class PostgresIntentRepository:
     def finish_online_transaction(self, intent: Intent, transaction_id: UUID, result: CardResult | None,
                                   status: str, error: dict | None) -> None:
         with self.pool.connection() as conn, conn.transaction():
+            (previous,) = conn.execute("SELECT status FROM transactions WHERE transaction_id = %s FOR UPDATE",
+                                       (transaction_id,)).fetchone()
+            verdict = transition(previous, status)  # same rule as finish(): never overwrite a final answer
+            if verdict != "apply":
+                if verdict == "reject":
+                    _audit_entity(conn, "SYSTEM", None, "transaction", transaction_id, "transaction.discrepancy",
+                                  previous, previous, f"illegal transition {previous} -> {status}",
+                                  {"current": previous, "attempted": status})
+                return
             row = conn.execute(
                 "UPDATE transactions SET status = %s, error = %s, method_reference = %s, auth_code = %s,"
-                " card_bin = %s, card_last4 = %s, reversal = %s, updated_at = now() WHERE transaction_id = %s"
+                " card_bin = %s, card_last4 = %s, reversal = %s, updated_at = now()"
+                " WHERE transaction_id = %s AND status = %s"
                 " RETURNING transaction_id, idempotency_key, status, amount, currency, payment_method,"
                 " method_reference, auth_code, error, metadata, created_at, updated_at",
                 (status, Jsonb(error) if error else None, result and result.method_reference,
                  result and result.auth_code, result and result.card_bin, result and result.card_last4,
-                 result and result.reversal, transaction_id)).fetchone()
+                 result and result.reversal, transaction_id, previous)).fetchone()
             settle_intent(conn, intent.intent_id, status, error, result and result.card_bin,
                           result and result.card_last4)
-            _audit_entity(conn, "SYSTEM", None, "transaction", transaction_id, "transaction.finish", "PENDING", status,
+            if status in SALE_STATUSES:  # the ledger, in this same transaction, as finish() does for terminals
+                amount, currency, method = row[3], row[4], row[5]
+                post_sale_once(conn, transaction_id, intent.merchant_id, currency, method, amount,
+                               self.fees.fee(intent.merchant_id, method, amount))
+            _audit_entity(conn, "SYSTEM", None, "transaction", transaction_id, "transaction.finish", previous, status,
                           error["error_code"] if error else None)
             if status != "PENDING":
                 payload = _response(row)

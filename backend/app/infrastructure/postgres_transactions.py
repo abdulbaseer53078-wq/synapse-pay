@@ -5,14 +5,21 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from app.application.fees import ConfigFeePolicy, FeePolicy
 from app.application.methods import MethodResult
-from app.application.transactions import Claim, NewTransaction, public_id
+from app.application.transactions import Claim, NewTransaction, TransactionSuperseded, public_id
+from app.domain.ledger import SALE_STATUSES
+from app.domain.state_machine import transition
 from app.domain.terminal import Actor
+from app.infrastructure.postgres_ledger import post_sale_once
 from app.infrastructure.webhook_outbox import enqueue
 from app.infrastructure.postgres_terminals import _OUTBOX_LOCK
 
 # Statuses that count against a terminal's daily limit: money moved, or may have.
 _SPENDING = ("PENDING", "AUTHORIZED", "CAPTURED", "SETTLED")
+# The response columns (_response takes the first 12), then what finish() needs besides.
+_RETURNING = ("transaction_id, idempotency_key, status, amount, currency, payment_method, method_reference,"
+              " auth_code, error, metadata, created_at, updated_at, merchant_id, payment_intent_id, webhook_url")
 
 
 def _audit_entity(conn: Connection, actor: str, actor_id: str | None, entity_type: str, entity_id: UUID,
@@ -71,8 +78,9 @@ class _IntentRefused(Exception):
 
 
 class PostgresTransactionRepository:
-    def __init__(self, pool: ConnectionPool):
+    def __init__(self, pool: ConnectionPool, fees: FeePolicy | None = None):
         self.pool = pool
+        self.fees = fees or ConfigFeePolicy({})  # no rates configured: no fee
 
     def terminal_merchant(self, terminal_id: UUID) -> UUID | None:
         with self.pool.connection() as conn:
@@ -174,33 +182,74 @@ class PostgresTransactionRepository:
                 " ORDER BY updated_at LIMIT %s", (method, older_than_seconds, limit)).fetchall()
 
     def mark_pending(self, transaction_id: UUID, terminal_id: UUID) -> None:
+        """INITIATED → PENDING, just before the network is asked. Raises TransactionSuperseded if the payment is no
+        longer INITIATED (the stuck-key sweep failed it while this request stalled): then it must not be sent."""
         with self.pool.connection() as conn, conn.transaction():
-            conn.execute("UPDATE transactions SET status = 'PENDING', updated_at = now() WHERE transaction_id = %s",
-                         (transaction_id,))
+            if conn.execute("UPDATE transactions SET status = 'PENDING', updated_at = now()"
+                            " WHERE transaction_id = %s AND status = 'INITIATED' RETURNING 1",
+                            (transaction_id,)).fetchone() is None:
+                raise TransactionSuperseded(transaction_id)
             _audit(conn, terminal_id, transaction_id, "transaction.send", "INITIATED", "PENDING")
+
+    def current(self, transaction_id: UUID) -> dict:
+        """The stored truth, as a TransactionResponse."""
+        with self.pool.connection() as conn:
+            return _response(conn.execute(f"SELECT {_RETURNING} FROM transactions WHERE transaction_id = %s",
+                                          (transaction_id,)).fetchone()[:12])
+
+    def stuck_in_flight(self, older_than_seconds: int, limit: int = 50) -> list[tuple[UUID, UUID]]:
+        """(transaction_id, terminal_id) of payments whose request died before reaching the network: the key is
+        still IN_FLIGHT and the transaction still INITIATED. Never PENDING ones: those may have been sent."""
+        with self.pool.connection() as conn:
+            return conn.execute(
+                "SELECT t.transaction_id, t.terminal_id FROM idempotency_keys k"
+                " JOIN transactions t ON t.transaction_id = k.transaction_id"
+                " WHERE k.state = 'IN_FLIGHT' AND t.status = 'INITIATED'"
+                " AND k.created_at < now() - make_interval(secs => %s)"
+                " ORDER BY k.created_at LIMIT %s", (older_than_seconds, limit)).fetchall()
 
     def finish(self, transaction_id: UUID, terminal_id: UUID, result: MethodResult | None, status: str,
                error: dict | None, store_response: bool, attempts: list[dict] | None = None,
-               trace_id: str | None = None) -> dict:
+               trace_id: str | None = None, expected: str | None = None) -> dict:
+        """Moves the payment to `status` if the state machine allows it; otherwise changes nothing and returns
+        the stored truth. A late or wrong answer (FAILED after SETTLED) is audited as a discrepancy, never
+        written. With `expected`, it applies only from that status (the sweeps: the payment may have moved on)."""
         with self.pool.connection() as conn, conn.transaction():
-            (previous,) = conn.execute("SELECT status FROM transactions WHERE transaction_id = %s FOR UPDATE",
-                                       (transaction_id,)).fetchone()
+            current = conn.execute(f"SELECT {_RETURNING} FROM transactions WHERE transaction_id = %s FOR UPDATE",
+                                   (transaction_id,)).fetchone()
+            previous = current[2]
+            verdict = "stale" if expected is not None and previous != expected else transition(previous, status)
+            if verdict != "apply":
+                if verdict == "reject":
+                    _audit(conn, terminal_id, transaction_id, "transaction.discrepancy", previous, previous,
+                           f"illegal transition {previous} -> {status}",
+                           payload={"current": previous, "attempted": status,
+                                    **({"error_code": error["error_code"]} if error else {})})
+                return _response(current[:12])
+            # The row is locked, so the status can't move under us; the guard in WHERE says so anyway.
             row = conn.execute(
-                "UPDATE transactions SET status = %s, error = %s, method_reference = %s, auth_code = %s,"
-                " card_bin = %s, card_last4 = %s, reversal = %s, updated_at = now() WHERE transaction_id = %s"
-                " RETURNING transaction_id, idempotency_key, status, amount, currency, payment_method,"
-                " method_reference, auth_code, error, metadata, created_at, updated_at, merchant_id,"
-                " payment_intent_id, webhook_url",
+                # A later answer adds what it knows and never erases what an earlier one stored (BIN, references).
+                "UPDATE transactions SET status = %s, error = %s, method_reference = coalesce(%s, method_reference),"
+                " auth_code = coalesce(%s, auth_code), card_bin = coalesce(%s, card_bin),"
+                " card_last4 = coalesce(%s, card_last4), reversal = coalesce(%s, reversal), updated_at = now()"
+                f" WHERE transaction_id = %s AND status = %s RETURNING {_RETURNING}",
                 (status, Jsonb(error) if error else None,
                  result.method_reference if result else None, result.auth_code if result else None,
                  result.bin if result else None, result.last4 if result else None,
-                 result.reversal if result else None, transaction_id)).fetchone()
+                 result.reversal if result else None, transaction_id, previous)).fetchone()
             response = _response(row[:12])
             if result and result.next_action:
                 # The SDK opens this URL; it is part of the response, and therefore of the stored idempotent
                 # replay, so a retry returns the same redirect instead of starting a second payment.
                 response["next_action"] = result.next_action
             merchant_id, idempotency_key, intent_id, webhook_url = row[12], row[1], row[13], row[14]
+            # PR 1: the money, in this same transaction: if anything below fails, the status change rolls back too.
+            # One SALE per payment, on its first move into a status where money really moved (CAPTURED -> SETTLED
+            # later must not count it twice; the unique index in migration 016 enforces that as well).
+            if status in SALE_STATUSES:
+                amount, currency, method = row[3], row[4], row[5]
+                post_sale_once(conn, transaction_id, merchant_id, currency, method, amount,
+                               self.fees.fee(merchant_id, method, amount))
             if intent_id is not None:
                 response["payment_intent_id"] = f"pi_{intent_id.hex}"
                 settle_intent(conn, intent_id, status, error, result.bin if result else None,

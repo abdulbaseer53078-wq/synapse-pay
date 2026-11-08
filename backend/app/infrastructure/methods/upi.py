@@ -59,7 +59,7 @@ class UpiPsp(Protocol):
     def collect(self, merchant_transaction_id: str, amount: int, currency: str, vpa: str,
                 flow_type: str = "COLLECT") -> dict: ...
     def status(self, psp_transaction_id: str) -> dict: ...
-    def refund(self, psp_transaction_id: str, amount: int) -> dict: ...
+    def refund(self, psp_transaction_id: str, amount: int, refund_id: str | None = None) -> dict: ...
 
 
 class UpiDetails(BaseModel):
@@ -138,11 +138,12 @@ class UpiMethodAdapter(BaseMethodAdapter):
         except PspDeclined as declined:
             return _failure(declined.code, declined.message, declined.category, declined.retryable)
 
-    def refund(self, transaction_id: UUID, amount: int, reference: str | None = None) -> MethodResult:
+    def refund(self, transaction_id: UUID, amount: int, reference: str | None = None,
+               refund_id: str | None = None) -> MethodResult:
         if not reference:
             raise UnsupportedOperation("UPI refund needs the PSP reference stored with the transaction")
         try:
-            reply = self.psp.refund(reference, amount)
+            reply = self.psp.refund(reference, amount, refund_id)
         except PspDeclined as declined:
             return _failure(declined.code, declined.message, declined.category, declined.retryable)
         return MethodResult(status="REFUNDED", method_reference=reply.get("refund_id", reference))

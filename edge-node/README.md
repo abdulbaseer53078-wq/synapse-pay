@@ -8,7 +8,7 @@ sync worker delivers the queue, oldest first, and the cloud verifies every signa
 | Module | Step | Job |
 | :--- | :--- | :--- |
 | `rules.py` | 20 | Signed offline rules: pinned cloud key, bound to this edge and merchant, versions only move forward, 72 h expiry that a wound-back clock can't extend, re-verified on every read |
-| `engine.py` | 21 | `POST /local/v1/transactions`: per-payment and per-terminal-per-day limits, idempotency, sign and queue |
+| `engine.py` | 21 | `POST /local/v1/transactions`: per-payment and per-terminal rolling-24-hour limits, idempotency, sign, chain and queue |
 | `sync.py` | 24 | FIFO batches of 50 to `POST /api/v1/transactions/sync`, crash recovery, exponential backoff, 30-day purge |
 | `alerts.py` | 24.5 | Signed webhook to the merchant app when an offline payment is refused at sync, retried until acknowledged |
 | `db.py` | | One SQLite file in WAL mode with `synchronous=FULL`; append-only migrations |
@@ -21,6 +21,11 @@ sync worker delivers the queue, oldest first, and the cloud verifies every signa
 - **The queue survives a reboot.** A payment is answered `PENDING_OFFLINE` only after it is committed to disk.
 - **Tampering fails closed.** An edited rule set stops offline payments; an edited queued payment fails the cloud's
   signature check at sync, and the merchant is alerted.
+- **No sale can be dropped or slipped in unseen.** Each queued item carries `edge_seq` (1, 2, 3…, never reused)
+  and `prev_hash`, the SHA-256 of the previous item as sent, both under its signature. The cloud checks the chain is
+  unbroken (PR 6). The chain head has its own table, so purging synced rows doesn't break it.
+- **The offline limit is a rolling 24 hours,** so midnight hands out no fresh allowance, and an unsynced sale counts
+  whatever its timestamp, so winding the clock on can't free room.
 - **Expired rules refuse payments.** After 72 h without the cloud, the edge stops accepting rather than enforce
   limits that may have been tightened since.
 

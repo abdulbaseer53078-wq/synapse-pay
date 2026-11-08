@@ -98,6 +98,10 @@ class CardRequest:
     trace_id: str | None = None  # passed to card-service, which logs it beside the STAN and RRN it sends
 
 
+class TransactionSuperseded(Exception):
+    """The payment left INITIATED before this request sent it (the stuck-key sweep failed it): don't send it."""
+
+
 class CardOutcomeUnknown(Exception):
     """The card service was sent the request but didn't answer: the acquirer may have acted on it."""
 
@@ -139,10 +143,12 @@ class TransactionRepository(Protocol):
     def terminal_merchant(self, terminal_id: UUID) -> UUID | None: ...
     def spent_today(self, terminal_id: UUID, since: datetime) -> int: ...
     def claim(self, txn: NewTransaction) -> Claim: ...
-    def mark_pending(self, transaction_id: UUID, terminal_id: UUID) -> None: ...
+    def mark_pending(self, transaction_id: UUID, terminal_id: UUID) -> None: ...  # raises TransactionSuperseded
+    def current(self, transaction_id: UUID) -> dict: ...
     def finish(self, transaction_id: UUID, terminal_id: UUID, result: MethodResult | None, status: str,
                error: dict | None, store_response: bool,
-               attempts: list[dict] | None = None, trace_id: str | None = None) -> dict: ...
+               attempts: list[dict] | None = None, trace_id: str | None = None,
+               expected: str | None = None) -> dict: ...
 
 
 def request_hash(body: dict[str, Any]) -> bytes:
@@ -256,7 +262,10 @@ class TransactionService:
             transaction_id=transaction_id, amount=txn.amount, currency=txn.currency,
             capture_mode=txn.capture_mode, merchant_id=merchant, terminal_id=caller_terminal,
             details=details, customer_ref=body.get("customer_ref"), metadata=txn.metadata, trace_id=trace_id)
-        self.repo.mark_pending(transaction_id, caller_terminal)
+        try:
+            self.repo.mark_pending(transaction_id, caller_terminal)
+        except TransactionSuperseded:
+            return self.repo.current(transaction_id)  # already failed by the sweep: answer with that, send nothing
         try:
             # Cascade only where a hint can actually change who is asked. A rail bound to one provider must
             # not be retried on a soft failure: that is the same request to the same place, not a failover.

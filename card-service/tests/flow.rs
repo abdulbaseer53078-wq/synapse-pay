@@ -44,7 +44,7 @@ fn request(amount: u64) -> CardRequest {
 
 fn flow(host: Arc<MockHostConnector>) -> CardFlow {
     let timeouts = Timeouts { reversal_backoff: Duration::from_millis(1), ..Timeouts::default() };
-    CardFlow { hsm: Arc::new(hsm()), host, timeouts, vault: None }
+    CardFlow { hsm: Arc::new(hsm()), host, timeouts, vault: None, reversals: None }
 }
 
 fn declined(code: &str, category: DeclineCategory) -> Result<HostResponse, HostError> {

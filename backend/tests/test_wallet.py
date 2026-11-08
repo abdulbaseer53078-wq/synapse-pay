@@ -53,7 +53,7 @@ def _request(details=None, amount=5000):
 def test_wallet_descriptor_has_no_partial_refunds_or_chargebacks():
     body = WALLET_CAPABILITIES.to_dict()
     assert body["payment_method"] == "WALLET"
-    assert body["supports_refund"] is True and body["supports_partial_refund"] is False
+    assert body["supports_refund"] is False and body["supports_partial_refund"] is False  # PR 4: no refund call yet
     assert body["supports_chargeback"] is False
     assert body["settlement_timeline"] == "T+0"
 

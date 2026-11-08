@@ -2,6 +2,7 @@
 "signature" field, keys sorted, no insignificant whitespace, UTF-8. The same bytes the cloud computes (spec 1.8.0),
 so any other serialisation simply fails to verify."""
 import base64
+import hashlib
 import json
 
 from cryptography.exceptions import InvalidSignature
@@ -14,6 +15,12 @@ SIGNATURE = "signature"
 def canonical(item: dict) -> bytes:
     body = {k: v for k, v in item.items() if k != SIGNATURE}
     return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def chain_hash(item: dict) -> str:
+    """PR 6: what the next queued item quotes as prev_hash. Over the item as sent, signature included."""
+    return hashlib.sha256(json.dumps(item, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                          .encode("utf-8")).hexdigest()
 
 
 def sign(private_key_pem: str, item: dict) -> str:

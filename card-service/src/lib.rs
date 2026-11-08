@@ -9,5 +9,6 @@ pub mod fleet;
 pub mod flow;
 pub mod hsm;
 pub mod http;
+pub mod reversals;
 pub mod vault;
 pub mod vault_pg;
