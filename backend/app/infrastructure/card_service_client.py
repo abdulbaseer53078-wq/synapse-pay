@@ -28,7 +28,8 @@ class HttpCardProcessor:
             "pin_block": request.pin_block, "host_hint": list(request.host_hint),
         }
         try:
-            response = self.client.post("/card/transactions", json=body)
+            headers = {"X-Trace-Id": request.trace_id} if request.trace_id else None
+            response = self.client.post("/card/transactions", json=body, headers=headers)
         except httpx.ConnectError as e:
             raise CardServiceUnavailable("the card service is unavailable; nothing was charged") from e
         except httpx.TimeoutException as e:

@@ -6,6 +6,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLSocketFactory;
@@ -35,11 +36,14 @@ public final class TransactionSender {
         public final int status;
         public final byte[] body;
         public final NetworkPath path;
+        /** The X-Trace-Id this payment was sent with (Step 18): quote it to support to find every log line. */
+        public final String traceId;
 
-        Response(int status, byte[] body, NetworkPath path) {
+        Response(int status, byte[] body, NetworkPath path, String traceId) {
             this.status = status;
             this.body = body;
             this.path = path;
+            this.traceId = traceId;
         }
     }
 
@@ -95,6 +99,8 @@ public final class TransactionSender {
     /** Sends {@code payload} (the serialized TransactionRequest) until the cloud gives a final answer. */
     public Response send(byte[] payload) throws IOException {
         final byte[] body = payload.clone();
+        // One trace id per payment, the same on every path and retry, so the cloud's logs join them into one trace.
+        final String traceId = UUID.randomUUID().toString().replace("-", "");
         final long deadline = System.nanoTime() + deadlineMs * 1_000_000;
         NetworkPath path = selector.active();
         while (true) {
@@ -103,7 +109,7 @@ public final class TransactionSender {
                 throw new OutcomeUnknownException("no final answer within " + deadlineMs + " ms; resend later");
             }
             try {
-                Response r = post(path, body);
+                Response r = post(path, body, traceId);
                 if (r.status == 409 && STILL_PROCESSING.matcher(new String(r.body, "UTF-8")).find()) {
                     sleep(stillProcessingDelayMs);
                     path = selector.active();
@@ -120,7 +126,7 @@ public final class TransactionSender {
         }
     }
 
-    private Response post(NetworkPath path, byte[] body) throws IOException {
+    private Response post(NetworkPath path, byte[] body, String traceId) throws IOException {
         HttpURLConnection c = (HttpURLConnection) path.open(url);
         if (tls != null && c instanceof HttpsURLConnection) ((HttpsURLConnection) c).setSSLSocketFactory(tls);
         c.setRequestMethod("POST");
@@ -129,6 +135,7 @@ public final class TransactionSender {
         c.setDoOutput(true);
         c.setFixedLengthStreamingMode(body.length);
         c.setRequestProperty("Content-Type", "application/json");
+        c.setRequestProperty("X-Trace-Id", traceId);
         current = new Attempt(path, c);
         try {
             if (!selector.isUp(path)) throw new IOException("path went down"); // lost while we were opening it
@@ -140,7 +147,7 @@ public final class TransactionSender {
             try (InputStream in = status < 400 ? c.getInputStream() : c.getErrorStream()) {
                 response = Io.readAll(in);
             }
-            return new Response(status, response, path);
+            return new Response(status, response, path, traceId);
         } finally {
             current = null;
         }

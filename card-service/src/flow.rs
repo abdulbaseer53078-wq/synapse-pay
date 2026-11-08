@@ -37,6 +37,10 @@ pub struct CardRequest {
     /// whatever the connector is configured with, which is what a single-host caller and the tests want.
     #[serde(default)]
     pub host_hint: Vec<String>,
+    /// From the X-Trace-Id header (Step 18): the one id that follows the payment from the SDK through Python,
+    /// this service and the fleet's events. Not part of the body.
+    #[serde(skip)]
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -182,7 +186,9 @@ impl CardFlow {
             terminal_id: req.acquirer_terminal_id.clone(),
             card: Card { pan: pan.as_str().to_owned(), expiry },
         };
-        let mut ctx = RequestContext::with_timeout(self.timeouts.host, &req.transaction_id);
+        // Without a trace id from the caller, the transaction id still ties this request's events together.
+        let trace = req.trace_id.clone().unwrap_or_else(|| req.transaction_id.clone());
+        let mut ctx = RequestContext::with_timeout(self.timeouts.host, &trace);
         ctx.host_hint = req.host_hint.clone();
         let result = self.host.send_transaction(&ctx, &txn).await;
         // Capture the winner before `outcome` borrows the result: on failure no host answered, so there is none.
@@ -193,7 +199,7 @@ impl CardFlow {
         let mut outcome = outcome(&txn.kind, &result);
         let mut reversal = Reversal::NotNeeded;
         if outcome.status == Status::Pending {
-            reversal = self.reverse(&txn).await;
+            reversal = self.reverse(&txn, &trace).await;
             if reversal == Reversal::Reversed {
                 outcome = Outcome {
                     status: Status::Failed,
@@ -218,7 +224,7 @@ impl CardFlow {
 
     /// Sends the reversal until the host confirms it or attempts run out. A decline of a reversal (e.g.
     /// "original not found") also counts as failed: someone has to look at it.
-    async fn reverse(&self, original: &Transaction) -> Reversal {
+    async fn reverse(&self, original: &Transaction, trace: &str) -> Reversal {
         let mut reversal = Transaction {
             transaction_id: format!("{}-rev", original.transaction_id),
             kind: TransactionKind::Reversal { original_transaction_id: original.transaction_id.clone() },
@@ -229,7 +235,7 @@ impl CardFlow {
             if attempt > 0 {
                 tokio::time::sleep(self.timeouts.reversal_backoff).await;
             }
-            let mut ctx = RequestContext::with_timeout(self.timeouts.reversal, &reversal.transaction_id);
+            let mut ctx = RequestContext::with_timeout(self.timeouts.reversal, trace); // same trace as the purchase
             // Deliberately empty. The purchase timed out, so the fleet never reported which host answered; the
             // only reversal that means anything is on the host holding the original, and the fleet must try the
             // hosts rather than have this layer pick one it cannot know.

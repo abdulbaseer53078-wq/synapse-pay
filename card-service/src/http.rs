@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -34,7 +34,12 @@ pub fn app(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-async fn transaction(State(state): State<Arc<AppState>>, Json(req): Json<CardRequest>) -> Response {
+async fn transaction(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(mut req): Json<CardRequest>)
+    -> Response {
+    // The backend sends the id as 32 lowercase hex digits; anything else is ignored rather than logged.
+    req.trace_id = headers.get("x-trace-id").and_then(|v| v.to_str().ok())
+        .filter(|v| v.len() == 32 && v.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        .map(str::to_owned);
     match state.flow.process(&req).await {
         Ok(result) => (StatusCode::OK, Json(result)).into_response(),
         Err(e) => flow_error(e),

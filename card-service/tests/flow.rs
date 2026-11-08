@@ -35,6 +35,7 @@ fn request(amount: u64) -> CardRequest {
         card_expiry: "08/28".into(),
         pin_block: None,
         host_hint: Vec::new(),
+        trace_id: None,
     }
 }
 

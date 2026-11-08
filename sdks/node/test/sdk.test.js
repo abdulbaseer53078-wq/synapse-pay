@@ -106,3 +106,12 @@ test("constructEvent rejects tampered bodies, wrong secrets and parsed JSON", ()
   assert.throws(() => synapse.webhooks.constructEvent(body, undefined, SECRET), SynapsePaySignatureError);
   assert.throws(() => synapse.webhooks.constructEvent(JSON.parse(body), sign(body), SECRET), SynapsePaySignatureError);
 });
+
+test("recoveryStats reads the merchant's failover savings", async () => {
+  const stats = { since: "2026-10-08T00:00:00Z", cascaded: 3, recovered: 2,
+                  recovered_amount: [{ currency: "INR", amount: 120000 }] };
+  const { fetch, calls } = scripted({ status: 200, body: stats });
+  assert.deepEqual(await client(fetch).merchants.recoveryStats({ days: 7 }), stats);
+  assert.equal(calls[0].url, "https://api.test/api/v1/merchants/me/recovery-stats?days=7");
+  assert.equal(calls[0].method, "GET");
+});

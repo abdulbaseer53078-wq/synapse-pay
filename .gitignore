@@ -10,3 +10,4 @@ graphify-out/
 node_modules/
 audit-worm/
 .verify-worm/
+observability/pagerduty_routing_key

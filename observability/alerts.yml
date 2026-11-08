@@ -1,0 +1,27 @@
+# Step 18 failover alerts. Region failover alerts live in CloudWatch (infra/region-failover).
+groups:
+  - name: failover
+    rules:
+      - alert: AcquirerSuccessRateLow
+        # Answered = an approval or a final decline; failed = timeout, soft decline or error that moved on.
+        expr: |
+          sum by (host) (rate(host_attempts_total{outcome="answered"}[5m]))
+            / sum by (host) (rate(host_attempts_total[5m])) < 0.80
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "{{ $labels.host }} answered under 80% of attempts for 5 minutes"
+      - alert: AllHostsDownForRail
+        expr: max by (rail) (host_up) == 0
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "Every {{ $labels.rail }} host is down: that rail can't take payments"
+      - alert: CascadeSuccessRateLow
+        # Of payments that failed over, the share a backup saved.
+        expr: |
+          sum(rate(cascade_total{outcome="recovered"}[5m])) / sum(rate(cascade_total[5m])) < 0.95
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Backups saved under 95% of failed-over payments for 5 minutes"

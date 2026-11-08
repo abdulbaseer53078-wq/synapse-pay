@@ -94,7 +94,7 @@ class CardMethodAdapter(BaseMethodAdapter):
             encrypted_card_data=request.details["encrypted_card_data"],
             card_expiry=request.details["card_expiry"],
             pin_block=request.details.get("pin_block"),
-            host_hint=list(request.host_hint))
+            host_hint=list(request.host_hint), trace_id=request.trace_id)
         result = self.processor.process(card)
         return MethodResult(status=result.status, method_reference=result.method_reference,
                             auth_code=result.auth_code, error=result.error, reversal=result.reversal,

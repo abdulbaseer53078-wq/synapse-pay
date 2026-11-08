@@ -1,5 +1,5 @@
 // A complete merchant integration in one file: create the payment on the server, take the card in the browser,
-// verify the webhook. Run the sandbox first (python -m app.sandbox in backend/), then:
+// verify the webhook; /recovery shows what failover saved. Run the sandbox first (python -m app.sandbox in backend/), then:
 //   SYNAPSE_SECRET_KEY=sk_test_... SYNAPSE_WEBHOOK_SECRET=whsec_... npm start
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -28,6 +28,16 @@ createServer(async (req, res) => {
         webhook_url: `http://localhost:${PORT}/webhooks`,  // https in production
       });
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ clientSecret: intent.client_secret }));
+    } else if (req.method === "GET" && req.url === "/recovery") {
+      // What failover saved this shop in the last 30 days: payments a backup acquirer approved.
+      const stats = await synapse.merchants.recoveryStats({ days: 30 });
+      const saved = stats.recovered_amount.map((r) => `${r.currency} ${(r.amount / 100).toFixed(2)}`).join(", ") || "nothing yet";
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(
+        `<!doctype html><meta charset="utf-8"><title>Recovered payments</title>
+<body style="font-family:system-ui;max-width:32rem;margin:2rem auto;padding:0 1rem">
+<h1>Recovered payments</h1><p>Last 30 days</p>
+<p><strong>${stats.recovered}</strong> of ${stats.cascaded} payments that failed over were approved by a backup acquirer.</p>
+<p>Sales saved: <strong>${saved}</strong></p></body>`);
     } else if (req.method === "POST" && req.url === "/webhooks") {
       // 3. Only trust a webhook whose signature checks out, over the raw body.
       const event = synapse.webhooks.constructEvent(await body(req), req.headers["x-signature"],

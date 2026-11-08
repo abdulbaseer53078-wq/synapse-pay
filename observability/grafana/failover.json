@@ -1,0 +1,141 @@
+{
+  "title": "Failover",
+  "uid": "failover",
+  "schemaVersion": 39,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Failovers per minute, by layer and reason",
+      "datasource": {
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (layer, reason) (rate(failover_count_total[5m])) * 60",
+          "legendFormat": "{{layer}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Acquirer answer rate",
+      "datasource": {
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host) (rate(host_attempts_total{outcome=\"answered\"}[5m])) / sum by (host) (rate(host_attempts_total[5m]))",
+          "legendFormat": "{{host}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Cascade success rate (backup saved the payment)",
+      "datasource": {
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cascade_total{outcome=\"recovered\"}[5m])) / sum(rate(cascade_total[5m]))",
+          "legendFormat": "recovered"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Time lost before failing over (p95)",
+      "datasource": {
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, layer) (rate(fallback_latency_seconds_bucket[5m])))",
+          "legendFormat": "{{layer}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "state-timeline",
+      "title": "Hosts up",
+      "datasource": {
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "host_up",
+          "legendFormat": "{{rail}} {{host}}"
+        }
+      ]
+    }
+  ]
+}

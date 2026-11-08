@@ -97,6 +97,9 @@ public final class ChaosTest {
             long total = ms(System.nanoTime() - cut) + 300;
             check(total <= ACQUIRER_MS + 1_000, "answer within acquirer time + 1 s: " + total + " ms");
             check(net.ui.equals(List.of("cellular")), "cashier shown the switch once: " + net.ui);
+            check(r.traceId.matches("[0-9a-f]{32}") && cloud.traces.size() >= 2
+                  && cloud.traces.stream().allMatch(r.traceId::equals),
+                  "every copy and still-processing poll carried the payment's one trace id: " + cloud.traces + " vs " + r.traceId);
             System.out.printf("     cut -> resent on cellular: %d ms; cut -> final answer: %d ms (acquirer %d ms)%n",
                               resent, total - 300, ACQUIRER_MS - 300);
         }
@@ -249,6 +252,7 @@ public final class ChaosTest {
     static final class FakeCloud implements AutoCloseable {
         static final Pattern KEY = Pattern.compile("\"idempotency_key\":\"([^\"]+)\"");
         final AtomicInteger charges = new AtomicInteger();
+        final List<String> traces = new CopyOnWriteArrayList<>();
         private final Map<String, Entry> entries = new HashMap<>();
         private final HttpServer server;
 
@@ -277,6 +281,7 @@ public final class ChaosTest {
         }
 
         private void transaction(HttpExchange ex) throws IOException {
+            traces.add(String.valueOf(ex.getRequestHeaders().getFirst("X-Trace-Id")));
             byte[] body = ex.getRequestBody().readAllBytes();
             Matcher m = KEY.matcher(new String(body, UTF_8));
             if (!m.find()) {

@@ -73,3 +73,15 @@ export interface TransactionEvent {
   created_at: string;
   updated_at: string;
 }
+
+/** Payments a backup acquirer saved (GET /api/v1/merchants/me/recovery-stats). */
+export interface RecoveryStats {
+  /** Start of the window, ISO 8601. */
+  since: string;
+  /** Payments that failed over to at least one backup acquirer. */
+  cascaded: number;
+  /** Of those, the ones a backup approved: sales that would otherwise have been lost. */
+  recovered: number;
+  /** Their value, per currency, in the smallest unit. */
+  recovered_amount: { currency: Currency; amount: number }[];
+}
