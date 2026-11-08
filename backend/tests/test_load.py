@@ -12,6 +12,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -69,6 +70,28 @@ def api_processes(settings, ca, card_url, workers, tmp_path):
         yield port
     finally:
         api.stop()
+        (tmp_path / "api.txt").write_text(api.output)  # a worker that died says why here
+        if os.environ.get("LOAD_TEST_OUT"):
+            (Path(os.environ["LOAD_TEST_OUT"]) / "api.txt").write_text(api.output)
+
+
+@contextmanager
+def heartbeating(db, terminal_id):
+    """A real terminal heartbeats every few seconds; without it, authorization refuses the terminal as UNREACHABLE
+    a couple of minutes into the run, and the test measures that instead of payments."""
+    stop = threading.Event()
+
+    def beat():
+        while not stop.wait(20):
+            db.execute("UPDATE terminals SET last_heartbeat_at = now() WHERE terminal_id = %s", (terminal_id,))
+
+    thread = threading.Thread(target=beat, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(5)
 
 
 def test_card_payments_at_100_tps(settings, ca, db, ready, merchant, acquirer, tmp_path, monkeypatch):  # noqa: F811
@@ -86,7 +109,7 @@ def test_card_payments_at_100_tps(settings, ca, db, ready, merchant, acquirer, t
         workers = int(os.environ.get("LOAD_WORKERS", "0"))
         server = (api_processes(settings, ca, acquirer[0], workers, tmp_path) if workers
                   else serve(create_app(settings, cards=cards)))
-        with server as started:
+        with server as started, heartbeating(db, ready["terminal_id"]):
             port = started if workers else started[1]
             k6_env = {"API_URL": f"http://host.docker.internal:{port}", "TERMINAL_ID": ready["terminal_id"],
                       "MERCHANT_ID": str(merchant), "ENVELOPE": encrypted_card(),
