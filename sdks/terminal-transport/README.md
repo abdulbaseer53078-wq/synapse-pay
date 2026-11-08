@@ -82,3 +82,66 @@ appear later (a cable plugged in after boot) is the terminal app's job until thi
   once it exists.
 - **Mesh paths.**
 - **A real-device test.** Interface binding (`Network.openConnection`) only exists on Android.
+
+## Connectivity mesh (Step 25)
+
+When Ethernet, Wi-Fi and cellular are all down, a terminal can reach the cloud through a neighbouring terminal of
+the same merchant that is still online.
+
+| Class | Job |
+| --- | --- |
+| `MeshDiscovery` | Online terminals announce their relay on UDP multicast every second; every terminal keeps a warm neighbour list. |
+| `MeshTls` | Terminal-to-terminal mutual TLS: the peer's certificate must chain to the terminal CA and name a terminal of this merchant. |
+| `MeshRelay` | The online neighbour's side: after the handshake, an HTTP `CONNECT` to the cloud API only (anything else is 403), then a byte pipe. |
+| `MeshPath` | The offline terminal's side: a `NetworkPath` (kind `MESH`), last in the `PathSelector` list. |
+
+The offline terminal's HTTPS session, with its own client certificate, runs end to end through the tunnel, so the
+neighbour can neither read nor change the payment, and the cloud sees the original terminal exactly as if it had
+connected directly: no envelope, no cloud change. Idempotency still makes every retry safe. With no neighbour in the
+warm list `MeshPath` fails at once, and an unreachable one within 500 ms, so the sender throws `NoPathException` and
+the app queues the sale offline. Use the mesh for online authorisation only; a sale the terminal would approve
+offline anyway should go straight to the offline queue.
+
+`./run-tests.sh` also runs `MeshTest`, with real certificates from the JDK's keytool (client-auth-only terminal
+certificates, as the production CA issues) and an HTTPS cloud that requires a terminal certificate:
+
+| Scenario | Result |
+| --- | --- |
+| A's links down, B online | A discovers B, the payment is approved over the mesh in under 2 s, and the cloud records A's certificate |
+| Another merchant's terminal asks B to relay | Refused at the handshake; nothing reaches the cloud |
+| A relay with a certificate from another CA | A refuses it; nothing reaches the cloud |
+| `CONNECT` to anything but the cloud | 403 |
+| No neighbour | `NoPathException` in under 500 ms |
+
+Wiring:
+
+```java
+MeshTls.SameMerchant peers = merchantTerminalIds::contains;          // from the cloud registry, refreshed when online
+SSLContext mesh = MeshTls.context(registrationKeyStore, password, terminalCa, peers);
+MeshDiscovery lan = new MeshDiscovery(InetAddress.getByName("239.255.25.1"), 5454, myTerminalId);
+MeshRelay relay = new MeshRelay(mesh, 0, "api.synapsepay.example:443", activeNetwork.getSocketFactory());
+lan.announce(relay.port(), () -> selector.active() != null && selector.active().kind() != NetworkPath.Kind.MESH, 1_000);
+PathSelector selector = new PathSelector(Arrays.asList(ethernet, wifi, cellular, new MeshPath(mesh, lan)));
+```
+
+A terminal relays only while it has its own link, never through another mesh hop.
+
+### BLE and Wi-Fi Direct (Android, untested here)
+
+Neither runs in a JVM, so this is a sketch. BLE carries the announcement and Wi-Fi Direct carries the data. Once the
+Wi-Fi Direct group is formed, its `p2p0` interface is an ordinary IP network, so `MeshRelay` and `MeshPath` run over
+it unchanged. Only discovery differs:
+
+```java
+// Advertise: BluetoothLeAdvertiser with service data = terminal id + Wi-Fi Direct device address.
+// Scan: BluetoothLeScanner keeps the freshest result per terminal (the same warm list as MeshDiscovery).
+final class BleNeighbours implements MeshPath.Neighbours {
+    public InetSocketAddress neighbour() {
+        // The freshest scanned terminal: connect with WifiP2pManager.connect(config with its device address),
+        // then return the group owner's address (WifiP2pInfo.groupOwnerAddress) and the relay port it advertised.
+    }
+}
+```
+
+Forming a Wi-Fi Direct group takes about 1–2 s, so it can't fit the 500 ms budget after an outage. Form the group
+ahead of time with the nearest neighbour, as the warm list is kept ahead of time.

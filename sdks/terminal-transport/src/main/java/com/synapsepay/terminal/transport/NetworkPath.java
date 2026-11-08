@@ -11,7 +11,8 @@ import java.net.URLConnection;
  * the connection to that interface (see the README). Tests use local proxies instead.
  */
 public interface NetworkPath {
-    enum Kind { ETHERNET, WIFI, CELLULAR }
+    /** MESH: a neighbouring terminal's connection ({@link MeshPath}, Step 25), always the lowest priority. */
+    enum Kind { ETHERNET, WIFI, CELLULAR, MESH }
 
     String name();
 
