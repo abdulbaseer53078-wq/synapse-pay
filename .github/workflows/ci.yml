@@ -45,6 +45,9 @@ jobs:
           python -m pytest -q -rfEs --ignore=tests/test_checkout_browser.py | tee "$RUNNER_TEMP/pytest.out"
           rc=${PIPESTATUS[0]}
           grep -E "^(FAILED|ERROR) " "$RUNNER_TEMP/pytest.out" | sed 's/^/::error title=backend::/' || true
+          if [ "$rc" -ne 0 ]; then  # the end of the run, newlines encoded, for failures that aren't a FAILED line
+            echo "::error title=backend output::$(tail -n 40 "$RUNNER_TEMP/pytest.out" | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+          fi
           exit "$rc"
 
   rust:
@@ -72,7 +75,14 @@ jobs:
           workspaces: ${{ matrix.crate }}
       - name: Tests
         working-directory: ${{ matrix.crate }}
-        run: cargo test
+        shell: bash
+        run: |
+          cargo test 2>&1 | tee "$RUNNER_TEMP/cargo.out"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then  # panics and failed test names, public as annotations
+            grep -E "panicked at|^test .* FAILED|^---- " "$RUNNER_TEMP/cargo.out" | head -20 | sed 's/^/::error title=${{ matrix.crate }}::/'
+          fi
+          exit "$rc"
       - name: Clippy (warnings are errors)
         working-directory: ${{ matrix.crate }}
         run: cargo clippy --all-targets -- -D warnings
