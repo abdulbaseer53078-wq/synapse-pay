@@ -10,10 +10,15 @@ from prometheus_client import start_http_server
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import ConnectionPool
 
+from app.api import certification_runs as certification_runs_api
+from app.api import card_tokens as card_tokens_api
+from app.api import certifications as certifications_api
 from app.api import (audit, capabilities, edge, errors, gateway, merchants, payment_intents, region, terminals,
                      transactions, upi_webhooks)
 from app.application import observability
 from app.application.audit import AuditQueryService
+from app.application.card_tokens import CardTokenService
+from app.application.certification import CertificationAdmin, CertificationMatrix
 from app.application.authorization import AuthorizationService
 from app.application.edge import EdgeService
 from app.application.hosts import CachedHealth, HealthRegistry
@@ -27,7 +32,6 @@ from app.application.transaction_sync import OfflineSyncService
 from app.application.transactions import TransactionService
 from app.application.upi_webhooks import WebhookHandler
 from app.config import Settings
-from app.infrastructure.config_certification import ConfigCertificationRegistry
 from app.infrastructure.aws_private_ca import AwsPrivateCertificateAuthority
 from app.infrastructure.file_ca import FileCertificateAuthority
 from app.infrastructure.methods.card import CardMethodAdapter
@@ -39,6 +43,8 @@ from app.infrastructure.upi_client import HttpUpiPsp
 from app.infrastructure.card_service_client import HttpCardProcessor
 from app.infrastructure.postgres_api_keys import PostgresApiKeys
 from app.infrastructure.postgres_audit import PostgresAuditStore
+from app.infrastructure.postgres_certification import PostgresCertifications, listen as listen_certifications
+from app.infrastructure.postgres_certification_runs import PostgresCertificationRuns
 from app.infrastructure.postgres_health import database_writable
 from app.infrastructure.postgres_intents import PostgresIntentRepository
 from app.infrastructure.postgres_recovery import PostgresRecoveryStats
@@ -106,6 +112,13 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
         # The router reads health.snapshot(); the poller is the only thing that talks to card-service.
         health_worker = threading.Thread(target=poll_health, name="host-health", daemon=True)
         health_worker.start()
+        # Step 26: load the matrix before serving, then keep it current. Until it loads, nothing is certified.
+        try:
+            certification.reload()
+        except Exception as exc:
+            print(f"certification matrix load failed: {type(exc).__name__}; every firmware is uncertified")
+        threading.Thread(target=listen_certifications, args=(settings.database_url, certification.reload, stop),
+                         name="certifications", daemon=True).start()
         yield
         stop.set()
         if worker:
@@ -119,13 +132,15 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
                        allow_headers=["content-type", "authorization"])
     app.state.jwt_public_key = settings.jwt_public_key
     repo = PostgresTerminalRepository(pool)
-    certification = ConfigCertificationRegistry(settings.certified_firmware)
+    certifications = PostgresCertifications(pool)
+    certification = CertificationMatrix(certifications)
     if settings.ca_backend == "aws_pca":
         ca = AwsPrivateCertificateAuthority(settings.aws_pca_arn, signing_algorithm=settings.aws_pca_signing_algorithm)
     else:
         ca = FileCertificateAuthority(settings.ca_cert_path, settings.ca_key_path, settings.ca_crl_path)
     app.state.registration = RegistrationService(repo, ca, settings.approved_models, certification)
     app.state.authorization = AuthorizationService(repo, certification)
+    app.state.certifications = CertificationAdmin(certifications, PostgresCertificationRuns(pool))
     cards = cards or HttpCardProcessor(settings.card_service_url)
     # Step 8: the one place a rail is chosen. Adding UPI was one line here and a module beside card.py.
     upi = UpiMethodAdapter(HttpUpiPsp(settings.upi_psp_url), webhook_secret=settings.upi_webhook_secret or None)
@@ -155,6 +170,7 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.state.wallet_webhooks = WebhookHandler(wallet, transaction_repo, PostgresWebhookEvents(pool),
                                                provider="wallet")
     app.state.intents = PaymentIntentService(PostgresIntentRepository(pool), cards)
+    app.state.card_tokens = CardTokenService(cards)  # Step 29: the vault is card-service's; this only relays
     app.state.api_keys = PostgresApiKeys(pool)
     app.state.recovery = PostgresRecoveryStats(pool)
     app.state.webhooks = webhooks
@@ -177,5 +193,8 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.include_router(gateway.router)
     app.include_router(region.router)
     app.include_router(merchants.router)
+    app.include_router(certifications_api.router)
+    app.include_router(card_tokens_api.router)
+    app.include_router(certification_runs_api.router)
     app.include_router(edge.router)
     return app

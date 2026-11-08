@@ -1,0 +1,25 @@
+{
+  "about": "Certification test matrix (Step 27). Each case is one payment; `expect` is checked against the API answer and the scheme simulator's DE 39 (null: the host must never see it). Test cards only.",
+  "cases": [
+    {"id": "visa-approve-inr", "scheme": "VISA", "pan": "4111111111111111", "expiry": "08/30", "amount": 15000, "currency": "INR",
+     "expect": {"http": 201, "status": "CAPTURED", "de39": "00"}},
+    {"id": "mastercard-approve-inr", "scheme": "MASTERCARD", "pan": "5555555555554444", "expiry": "08/30", "amount": 15000, "currency": "INR",
+     "expect": {"http": 201, "status": "CAPTURED", "de39": "00"}},
+    {"id": "rupay-approve-inr", "scheme": "RUPAY", "pan": "6521000000000007", "expiry": "08/30", "amount": 15000, "currency": "INR",
+     "expect": {"http": 201, "status": "CAPTURED", "de39": "00"}},
+    {"id": "amex-approve-inr", "scheme": "AMEX", "pan": "378282246310005", "expiry": "08/30", "amount": 15000, "currency": "INR",
+     "expect": {"http": 201, "status": "CAPTURED", "de39": "00"}},
+    {"id": "visa-approve-usd", "scheme": "VISA", "pan": "4111111111111111", "expiry": "08/30", "amount": 2500, "currency": "USD",
+     "expect": {"http": 201, "status": "CAPTURED", "de39": "00"}},
+    {"id": "rupay-online-pin", "scheme": "RUPAY", "pan": "6070000000000002", "expiry": "08/30", "amount": 600000, "currency": "INR", "pin": "1234",
+     "expect": {"http": 201, "status": "CAPTURED", "de39": "00"}},
+    {"id": "visa-insufficient-funds", "scheme": "VISA", "pan": "4111111111111111", "expiry": "08/30", "amount": 5100, "currency": "INR",
+     "expect": {"http": 201, "status": "FAILED", "error_code": "INSUFFICIENT_FUNDS", "de39": "51"}},
+    {"id": "mastercard-insufficient-funds", "scheme": "MASTERCARD", "pan": "5555555555554444", "expiry": "08/30", "amount": 5100, "currency": "INR",
+     "expect": {"http": 201, "status": "FAILED", "error_code": "INSUFFICIENT_FUNDS", "de39": "51"}},
+    {"id": "mastercard-expired-card", "scheme": "MASTERCARD", "pan": "5555555555554444", "expiry": "01/20", "amount": 15000, "currency": "INR",
+     "expect": {"http": 201, "status": "FAILED", "error_code": "ISSUER_DECLINED", "de39": "54"}},
+    {"id": "visa-invalid-card-number", "scheme": "VISA", "pan": "4111111111111112", "expiry": "08/30", "amount": 15000, "currency": "INR",
+     "expect": {"http": 400, "error_code": "INVALID_REQUEST", "de39": null}}
+  ]
+}

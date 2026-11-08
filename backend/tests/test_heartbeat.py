@@ -75,15 +75,13 @@ def test_certified_firmware_change_is_accepted(client, db, active, terminal):
     assert terminal_row(db, active)[3] == "2.5.0"
 
 
-def test_uncertified_firmware_change_suspends(client, db, active, terminal):
+def test_uncertified_firmware_change_is_recorded_without_suspending(client, db, active, terminal):
+    # Step 26: the terminal stays ACTIVE; authorization refuses every payment until 9.9.9 is certified.
     r = send(client, active, heartbeat_body(firmware="9.9.9"), terminal)
-    assert r.status_code == 200 and r.json()["status"] == "SUSPENDED"
-    assert terminal_row(db, active)[0] == "SUSPENDED" and terminal_row(db, active)[3] == "9.9.9"
-    assert db.execute("SELECT actor_type, action, reason FROM audit_log WHERE to_status = 'SUSPENDED'"
-                      ).fetchone() == ("SYSTEM", "suspend", "UNCERTIFIED_FIRMWARE")
-    # A suspended terminal keeps reporting in.
-    later = heartbeat_body(firmware="9.9.9", sent_at=datetime.now(UTC) + timedelta(seconds=1))
-    assert send(client, active, later, terminal).json()["status"] == "SUSPENDED"
+    assert r.status_code == 200 and r.json()["status"] == "ACTIVE"
+    assert terminal_row(db, active)[0] == "ACTIVE" and terminal_row(db, active)[3] == "9.9.9"
+    assert db.execute("SELECT actor_type, action, from_status, to_status FROM audit_log"
+                      " WHERE action = 'firmware_change'").fetchone() == ("TERMINAL", "firmware_change", "2.4.1", "9.9.9")
 
 
 def test_revoked_terminal_heartbeat_is_logged_without_state_change(client, db, active, terminal, auth):

@@ -12,14 +12,17 @@ iso8583 = { path = "../iso8583" }
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
+hmac = "0.12"
 base64 = "0.22"
 zeroize = "1"
 p256 = { version = "0.13", features = ["ecdh", "pkcs8", "pem", "jwk"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+# Step 29: the token vault's own database.
+tokio-postgres = "0.7"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

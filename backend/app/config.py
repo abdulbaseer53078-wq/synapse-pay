@@ -10,14 +10,6 @@ DEFAULT_APPROVED_MODELS = {
     "PAX A920 Pro": r"PAX-A920PRO-[0-9A-F]{8}",
     "Sunmi P2": r"SUNMI-P2-[0-9A-F]{8}",
 }
-DEFAULT_CERTIFIED_FIRMWARE = {
-    "PAX A920 Pro": ["2.4.1", "2.5.0"],
-    "Sunmi P2": ["1.8.0"],
-}
-
-
-def _certified(raw: dict[str, list[str]]) -> dict[str, set[str]]:
-    return {model: set(versions) for model, versions in raw.items()}
 
 
 @dataclass(frozen=True)
@@ -28,7 +20,6 @@ class Settings:
     ca_crl_path: Path  # where the CA publishes its CRL for the mTLS gateway
     jwt_public_key: str  # PEM; verifies merchant and admin OAuth access tokens
     approved_models: dict[str, re.Pattern]
-    certified_firmware: dict[str, set[str]] = field(default_factory=lambda: _certified(DEFAULT_CERTIFIED_FIRMWARE))
     card_service_url: str = "http://127.0.0.1:7070"  # card-service/ (holds the HSM and the acquirer link)
     # Step 10A: the UPI PSP. mock-psp/mock_psp.py speaks the same shapes locally.
     upi_psp_url: str = "http://127.0.0.1:8080"
@@ -83,8 +74,6 @@ class Settings:
             ca_crl_path=ca_path("CA_CRL_PATH"),
             jwt_public_key=Path(os.environ["JWT_PUBLIC_KEY_PATH"]).read_text(),
             approved_models={name: re.compile(pattern) for name, pattern in models.items()},
-            certified_firmware=_certified(
-                json.loads(os.environ.get("CERTIFIED_FIRMWARE", "null")) or DEFAULT_CERTIFIED_FIRMWARE),
             card_service_url=os.environ.get("CARD_SERVICE_URL", "http://127.0.0.1:7070"),
             upi_psp_url=os.environ.get("UPI_PSP_URL", "http://127.0.0.1:8080"),
             wallet_url=os.environ.get("WALLET_URL", "http://127.0.0.1:8090"),

@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.9.0
+  version: 1.12.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
-    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions.
+    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token.
 servers:
   - url: /api
 # Merchant backends use OAuth2; terminals use mTLS. Either satisfies a request.
@@ -259,6 +259,214 @@ paths:
               schema: { $ref: '#/components/schemas/RecoveryStats' }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+  /v1/certifications:
+    post:
+      operationId: createCertification
+      summary: Record a scheme certification for one exact firmware (platform admin)
+      description: >-
+        Since 1.10.0. One row per device model, exact firmware version, scheme and acquirer: there are no
+        wildcards, because a patch release voids certification until it is re-tested. Takes effect on the next
+        transaction-time authorization; audited. Since 1.11.0, 409 CERTIFICATION_RUN_REQUIRED unless the
+        latest certification test run for the firmware passed this scheme (recordCertificationRun).
+      security: [{ OAuth2ClientCredentials: [registry:admin] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCertificationRequest' }
+      responses:
+        '201':
+          description: Recorded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Certification' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    get:
+      operationId: listCertifications
+      summary: The certification matrix (platform admin)
+      security: [{ OAuth2ClientCredentials: [registry:admin] }]
+      parameters:
+        - { name: device_model, in: query, schema: { type: string, maxLength: 64 } }
+        - { name: firmware_version, in: query, schema: { type: string, maxLength: 32 } }
+      responses:
+        '200':
+          description: Matching certifications.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [certifications]
+                properties:
+                  certifications: { type: array, items: { $ref: '#/components/schemas/Certification' } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/certification-runs:
+    post:
+      operationId: recordCertificationRun
+      summary: Record a certification test harness run for one exact firmware
+      description: >-
+        Since 1.11.0. Recording a run approves nothing. createCertification answers 409
+        CERTIFICATION_RUN_REQUIRED unless the latest run for that device model and firmware passed and covered
+        the scheme, so a regression found after a pass blocks approval. `passed` is derived from the report's
+        cases, never taken from the caller. Reports carry the PAN masked and chip data as tags and lengths only.
+        Audited.
+      security: [{ OAuth2ClientCredentials: ['certification:run'] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [device_model, firmware_version, driver, report]
+              properties:
+                device_model: { type: string, minLength: 1, maxLength: 64 }
+                firmware_version: { type: string, minLength: 1, maxLength: 32, examples: ['2.6.0'] }
+                driver: { type: string, minLength: 1, maxLength: 64, description: "What drove the terminal: software or a device driver." }
+                report:
+                  type: object
+                  description: The harness report (certification/harness.py). Fields beyond these are stored as given.
+                  required: [cases]
+                  properties:
+                    cases:
+                      type: array
+                      maxItems: 500
+                      items:
+                        type: object
+                        required: [id, scheme, passed]
+                        properties:
+                          id: { type: string, minLength: 1, maxLength: 64 }
+                          scheme: { type: string, enum: [VISA, MASTERCARD, RUPAY, AMEX, NPCI_UPI] }
+                          passed: { type: boolean }
+      responses:
+        '201':
+          description: Recorded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run_id, device_model, firmware_version, driver, passed, schemes, recorded_at]
+                properties:
+                  run_id: { type: string, format: uuid }
+                  device_model: { type: string }
+                  firmware_version: { type: string }
+                  driver: { type: string }
+                  passed: { type: boolean, description: "True only if the report has cases and every one passed." }
+                  schemes: { type: array, items: { type: string } }
+                  recorded_at: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/certifications/{certification_id}:
+    patch:
+      operationId: updateCertification
+      summary: Suspend, reactivate or re-date a certification (platform admin)
+      description: Since 1.10.0. A suspended or expired certification authorizes nothing; audited.
+      security: [{ OAuth2ClientCredentials: [registry:admin] }]
+      parameters:
+        - { name: certification_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                status: { type: string, enum: [ACTIVE, SUSPENDED] }
+                valid_until: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Certification' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/device-models/{device_model}/minimum-firmware:
+    put:
+      operationId: setMinimumFirmware
+      summary: Set a model's minimum secure firmware (platform admin)
+      description: >-
+        Since 1.10.0. Older firmware is refused even where certified, and a heartbeat reporting a change to it
+        suspends the terminal (reason FIRMWARE_DOWNGRADE). Audited.
+      security: [{ OAuth2ClientCredentials: [registry:admin] }]
+      parameters:
+        - { name: device_model, in: path, required: true, schema: { type: string, maxLength: 64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [minimum_secure_firmware]
+              properties:
+                minimum_secure_firmware: { type: string, maxLength: 32, examples: ['2.4.1'] }
+      responses:
+        '200':
+          description: Set.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device_model, minimum_secure_firmware]
+                properties:
+                  device_model: { type: string }
+                  minimum_secure_firmware: { type: string }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/card-tokens:
+    post:
+      operationId: createCardToken
+      summary: Save a card for later payments (merchant server)
+      description: >-
+        Since 1.12.0. The card arrives encrypted to the checkout key (sp2), as from the card form, and is stored
+        only in the PCI vault: the answer is a token and the masked card. Saving the same card again returns the
+        same token, so a retry is safe. Pay with it by sending card_token in CardDetails.
+      security:
+        - SecretKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [encrypted_card_data, card_expiry, card_network]
+              properties:
+                encrypted_card_data: { type: string, minLength: 1, description: 'The PAN in an sp2 envelope.' }
+                card_expiry: { type: string, pattern: '^(0[1-9]|1[0-2])/[0-9]{2}$' }
+                card_network: { type: string, enum: [VISA, MASTERCARD, RUPAY, AMEX] }
+                customer_ref: { type: string, maxLength: 128 }
+      responses:
+        '201':
+          description: Saved (or already saved).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CardToken' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+  /v1/card-tokens/{card_token}:
+    delete:
+      operationId: deleteCardToken
+      summary: Forget a saved card (merchant server)
+      description: Since 1.12.0. Takes effect on the next payment, and edge nodes drop it at their next sync.
+      security:
+        - SecretKey: []
+      parameters:
+        - { name: card_token, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted. }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
   /v1/terminals:
     get:
       operationId: listTerminals
@@ -950,6 +1158,7 @@ components:
             registry:read: Read terminal registry entries
             registry:write: Register and update terminals
             registry:admin: Platform-admin terminal operations (any merchant's terminals; reinstate)
+            certification:run: Record certification test harness runs (CI, test lab); approves nothing
             registry:authorize: Routing engine's per-transaction terminal authorization check
             audit:read: Read the append-only audit log (support, compliance and dispute tooling)
     # Merchant server → cloud with a secret API key (1.3.0): Authorization: Bearer sk_test_...
@@ -1347,7 +1556,7 @@ components:
           type: string
           pattern: '^(system|(merchant|terminal|admin|sdk|host-connector):.+)$'
           examples: ['terminal:9f1c...', 'merchant:0b2e...', 'system']
-        entity_id: { type: string, description: The transaction, terminal or merchant the event is about. }
+        entity_id: { type: string, description: "The transaction, terminal or merchant the event is about." }
         correlation_id:
           type: string
           description: Ties every event of one business action together; defaults to entity_id.
@@ -1406,6 +1615,52 @@ components:
             card_expiry: { type: string, pattern: '^(0[1-9]|1[0-2])/[0-9]{2}$' }
             card_network: { type: string, enum: [VISA, MASTERCARD, RUPAY, AMEX] }
             cardholder_name: { type: string, description: PII; not stored. }
+    CreateCertificationRequest:
+      type: object
+      additionalProperties: false
+      required: [device_model, firmware_version, scheme, acquirer_id, certificate_number, valid_until]
+      properties:
+        device_model: { type: string, maxLength: 64, examples: ['PAX A920 Pro'] }
+        firmware_version:
+          type: string
+          maxLength: 32
+          pattern: '^v?[0-9]+(\.[0-9]+)*$'
+          description: Exact version. No wildcards or ranges.
+        scheme: { type: string, enum: [VISA, MASTERCARD, RUPAY, AMEX, NPCI_UPI] }
+        acquirer_id: { type: string, maxLength: 64, description: The acquirer or PSP host the certification covers. }
+        certificate_number: { type: string, maxLength: 128, description: The scheme's own reference. }
+        valid_from: { type: string, format: date-time, description: Default now. }
+        valid_until: { type: string, format: date-time }
+    Certification:
+      type: object
+      additionalProperties: false
+      required: [certification_id, device_model, firmware_version, scheme, acquirer_id, certificate_number, status,
+                 valid_from, valid_until]
+      properties:
+        certification_id: { type: string, format: uuid }
+        device_model: { $ref: '#/components/schemas/CreateCertificationRequest/properties/device_model' }
+        firmware_version: { $ref: '#/components/schemas/CreateCertificationRequest/properties/firmware_version' }
+        scheme: { $ref: '#/components/schemas/CreateCertificationRequest/properties/scheme' }
+        acquirer_id: { $ref: '#/components/schemas/CreateCertificationRequest/properties/acquirer_id' }
+        certificate_number: { $ref: '#/components/schemas/CreateCertificationRequest/properties/certificate_number' }
+        status: { type: string, enum: [ACTIVE, SUSPENDED] }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+    CardToken:
+      type: object
+      additionalProperties: false
+      required: [token, token_type, card_bin, card_last4, card_network, card_expiry]
+      properties:
+        token: { type: string, pattern: '^tok_[0-9a-f]{32}$' }
+        token_type:
+          type: string
+          enum: [PAN, DPAN]
+          description: DPAN when the card network issued a network token (only usable by this merchant).
+        card_bin: { type: string, pattern: '^[0-9]{6}$' }
+        card_last4: { type: string, pattern: '^[0-9]{4}$' }
+        card_network: { type: string, enum: [VISA, MASTERCARD, RUPAY, AMEX] }
+        card_expiry: { type: string }
+        customer_ref: { type: string }
     RecoveryStats:
       type: object
       additionalProperties: false
@@ -1413,7 +1668,7 @@ components:
       properties:
         since: { type: string, format: date-time }
         cascaded: { type: integer, minimum: 0, description: Payments tried on more than one acquirer. }
-        recovered: { type: integer, minimum: 0, description: Of those, approved by a backup. }
+        recovered: { type: integer, minimum: 0, description: "Of those, approved by a backup." }
         recovered_amount:
           type: array
           description: Value of the recovered payments, per currency, in minor units.
@@ -1672,6 +1927,7 @@ components:
             - INTERNAL_ERROR
             - AUTHENTICATION_FAILED
             - PAYMENT_INTENT_NOT_FOUND
+            - CARD_TOKEN_NOT_FOUND
           description: >-
             Machine-readable code. ISSUER_DECLINED (since 1.1.0) covers issuer declines without a more
             specific code; error_category says whether it's soft or hard. Values are added over time, so
@@ -1741,7 +1997,7 @@ components:
             the authority that can fail the payment.
           required: [max_per_txn, currency, max_age_minutes]
           properties:
-            max_per_txn: { type: integer, minimum: 1, description: Minor units, per transaction. }
+            max_per_txn: { type: integer, minimum: 1, description: "Minor units, per transaction." }
             currency: { type: string, pattern: '^[A-Z]{3}$' }
             max_age_minutes:
               type: integer
@@ -1953,8 +2209,22 @@ components:
     CardDetails:
       type: object
       additionalProperties: false
-      required: [encrypted_card_data, card_expiry, card_network]
+      required: [card_network]
+      description: >-
+        Exactly one card: encrypted_card_data (with card_expiry), or since 1.12.0 a saved card's card_token
+        (card_expiry optional; the saved one is used).
+      oneOf:
+        - required: [encrypted_card_data, card_expiry]
+          not: { required: [card_token] }
+        - required: [card_token]
+          not: { required: [encrypted_card_data] }
       properties:
+        card_token:
+          type: string
+          pattern: '^tok_[0-9a-f]{32}$'
+          description: >-
+            Since 1.12.0. A card this merchant saved with createCardToken. Only the merchant that saved it can pay
+            with it.
         encrypted_card_data:
           type: string
           minLength: 1
@@ -1980,6 +2250,15 @@ components:
             Since 1.2.0. The cardholder's PIN as an ISO 9564 format 0 block, encrypted by the PIN pad in the same
             envelope as encrypted_card_data. Required by the issuer for chip payments and for contactless above
             the no-PIN limit (₹5,000 in India). Never logged.
+        emv_data:
+          type: string
+          pattern: '^([0-9A-F]{2}){1,255}$'
+          description: >-
+            Since 1.11.0. Chip and contactless payments: the card's EMV data as uppercase hex BER-TLV, sent to the
+            acquirer as DE 55. It carries the application cryptogram the issuer verifies (9F26) and its inputs
+            (9F02 amount, 5F2A currency, 9F37 unpredictable number, 9F36 ATC, 95 TVR, 9A date, 9C type, 82 AIP,
+            9F10 issuer application data, 9F27 cryptogram information). Card data: may repeat the PAN (5A);
+            never logged.
 
     UpiDetails:
       type: object

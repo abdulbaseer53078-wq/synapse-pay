@@ -157,7 +157,7 @@ fn purchase() -> Transaction {
         currency: "INR".into(),
         merchant_id: "MERCHANT0000001".into(),
         terminal_id: "TERM0001".into(),
-        card: Card { pan: "4111111111111111".into(), expiry: "2808".into() },
+        card: Card { pan: "4111111111111111".into(), expiry: "2808".into(), icc: None },
     }
 }
 

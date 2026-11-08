@@ -7,7 +7,7 @@ It is a translation layer, not a new implementation. Everything below already ex
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.application.methods import (AdapterUnavailable, CapabilityDescriptor, DisputeRules, InvalidMethodDetails,
                                      MethodRequest, MethodResult, OutcomeUnknown, Transition)
@@ -21,11 +21,23 @@ class CardDetails(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    encrypted_card_data: str = Field(min_length=1, max_length=4096)
-    card_expiry: str = Field(pattern=r"^(0[1-9]|1[0-2])/[0-9]{2}$")
+    encrypted_card_data: str | None = Field(default=None, min_length=1, max_length=4096)
+    # Step 29 (spec 1.12.0): a card the merchant saved, instead of encrypted_card_data.
+    card_token: str | None = Field(default=None, pattern=r"^tok_[0-9a-f]{32}$")
+    card_expiry: str | None = Field(default=None, pattern=r"^(0[1-9]|1[0-2])/[0-9]{2}$")
     cardholder_name: str | None = Field(default=None, max_length=128)
     card_network: Literal["VISA", "MASTERCARD", "RUPAY", "AMEX"]
     pin_block: str | None = Field(default=None, min_length=1, max_length=512)
+    # Chip and contactless (spec 1.11.0): the chip's EMV data as uppercase hex BER-TLV, sent as DE 55.
+    emv_data: str | None = Field(default=None, pattern=r"^(?:[0-9A-F]{2}){1,255}$")
+
+    @model_validator(mode="after")
+    def _one_card(self):
+        if (self.encrypted_card_data is None) == (self.card_token is None):
+            raise ValueError("give exactly one of method_details.encrypted_card_data or method_details.card_token")
+        if self.encrypted_card_data is not None and self.card_expiry is None:
+            raise ValueError("method_details.card_expiry is required with method_details.encrypted_card_data")
+        return self
 
 
 def acquirer_ids(terminal_id: UUID, merchant_id: UUID) -> tuple[str, str]:
@@ -91,9 +103,10 @@ class CardMethodAdapter(BaseMethodAdapter):
             kind="PURCHASE" if request.capture_mode == "AUTO" else "AUTHORIZATION",
             amount=request.amount, currency=request.currency,
             acquirer_terminal_id=terminal, acquirer_merchant_id=merchant,
-            encrypted_card_data=request.details["encrypted_card_data"],
-            card_expiry=request.details["card_expiry"],
-            pin_block=request.details.get("pin_block"),
+            encrypted_card_data=request.details.get("encrypted_card_data") or "",
+            card_expiry=request.details.get("card_expiry") or "",
+            card_token=request.details.get("card_token"), merchant_id=str(request.merchant_id),
+            pin_block=request.details.get("pin_block"), emv_data=request.details.get("emv_data"),
             host_hint=list(request.host_hint), trace_id=request.trace_id)
         result = self.processor.process(card)
         return MethodResult(status=result.status, method_reference=result.method_reference,

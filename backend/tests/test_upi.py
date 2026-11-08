@@ -190,7 +190,7 @@ class _Repo:
 
 
 class _Auth:
-    def authorize(self, terminal_id, method, amount):
+    def authorize(self, terminal_id, method, amount, card_network=None):
         return SimpleNamespace(reason=None, profile=None)
 
 

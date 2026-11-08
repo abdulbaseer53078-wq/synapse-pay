@@ -83,6 +83,9 @@ pub struct Card {
     pub pan: String,
     /// YYMM.
     pub expiry: String,
+    /// The chip's EMV data (BER-TLV) for DE 55: the cryptogram the issuer checks (9F26) and its inputs. Card data:
+    /// it can repeat the PAN (tag 5A), so it is never logged and never in Debug output.
+    pub icc: Option<Vec<u8>>,
 }
 
 /// Shows only the last 4 digits: transactions get logged, card numbers must not be.

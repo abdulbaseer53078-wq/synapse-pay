@@ -34,6 +34,9 @@ fn request(amount: u64) -> CardRequest {
         encrypted_card_data: hsm().seal([1; 10], [2; 12], "data", PAN.as_bytes()),
         card_expiry: "08/28".into(),
         pin_block: None,
+        emv_data: None,
+        card_token: None,
+        merchant_id: None,
         host_hint: Vec::new(),
         trace_id: None,
     }
@@ -41,7 +44,7 @@ fn request(amount: u64) -> CardRequest {
 
 fn flow(host: Arc<MockHostConnector>) -> CardFlow {
     let timeouts = Timeouts { reversal_backoff: Duration::from_millis(1), ..Timeouts::default() };
-    CardFlow { hsm: Arc::new(hsm()), host, timeouts }
+    CardFlow { hsm: Arc::new(hsm()), host, timeouts, vault: None }
 }
 
 fn declined(code: &str, category: DeclineCategory) -> Result<HostResponse, HostError> {

@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from app.config import DEFAULT_APPROVED_MODELS, Settings
 from app.main import create_app
+from app.sandbox import certify_sandbox_firmware
 from terminal_sim import SimulatedTerminal, register_body, url
 from e2e_stack import acquirer, card_service_binary, multi_acquirer  # noqa: F401  (fixtures for end-to-end tests)
 
@@ -26,6 +27,11 @@ MIGRATIONS = Path(__file__).parents[2] / "db" / "migrations"
 ADMIN_URL = os.environ.get("TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
 TEST_DB = os.environ.get("TEST_DB_NAME", "synapse_test")  # set a different name to run suites in parallel
 PEM = serialization.Encoding.PEM
+
+
+TEST_ACQUIRERS = ("acquirer_a", "acquirer_b", "acquirer_default", "acquirer_premium", "acquirer_x", "psp_1", "psp_2",
+                  "psp_a", "psp_b", "psp_c", "psp_fast", "psp_slow", "psp_known", "psp_upi_1", "psp_qr_1", "psp_x",
+                  "psp_y", "upi_psp")
 
 
 @pytest.fixture(scope="session")
@@ -45,7 +51,10 @@ def db(database_url):
     with psycopg.connect(database_url, autocommit=True) as conn:
         conn.execute("TRUNCATE merchants, terminals, certificates, heartbeats, registration_tokens,"
                      " activation_challenges, audit_log, certification_profiles, transactions, idempotency_keys,"
-                     " payment_intents, api_keys, webhook_deliveries CASCADE")
+                     " payment_intents, api_keys, webhook_deliveries, certifications, firmware_minimums,"
+                     " certification_runs CASCADE")
+        # Step 26: the simulated terminals' firmware, certified on every host the tests route to.
+        certify_sandbox_firmware(conn, TEST_ACQUIRERS)
         yield conn
 
 

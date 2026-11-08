@@ -30,8 +30,10 @@ use std::time::Duration;
 
 use card_service::fleet::Fleet;
 use card_service::flow::{CardFlow, Timeouts};
-use card_service::hsm::SimHsm;
+use card_service::hsm::{Hsm, SimHsm};
 use card_service::http::AppState;
+use card_service::vault::{MemoryStore, NetworkTokenProvider, NoNetworkTokens, SimulatedTokenService, Vault, VaultStore};
+use card_service::vault_pg::PgStore;
 use host_connector::audit::{AuditSink, JsonLines};
 use host_connector::framing::{Framing, LengthHeader};
 use host_connector::iso_host::IsoHostConfig;
@@ -173,7 +175,22 @@ async fn main() {
     let fleet = Arc::new(Fleet::new(pools, stans));
     // The fleet *is* the host connector: one host or five, CardFlow calls the same trait method.
     let host: Arc<dyn HostConnector> = fleet.clone();
-    let flow = CardFlow { hsm: Arc::new(hsm), host, timeouts };
+    let hsm: Arc<dyn Hsm> = Arc::new(hsm);
+    // Step 29: the token vault, in its own database. VAULT_IN_MEMORY=1 is for the sandbox only: tokens vanish on exit.
+    let network_tokens: Arc<dyn NetworkTokenProvider> = match env::var("NETWORK_TOKENS").as_deref() {
+        Ok("simulated") => Arc::new(SimulatedTokenService::default()),
+        _ => Arc::new(NoNetworkTokens),
+    };
+    let store: Option<Arc<dyn VaultStore>> = if let Ok(url) = env::var("VAULT_DATABASE_URL") {
+        Some(Arc::new(PgStore::connect(&url).await.unwrap_or_else(|e| fail(&format!("vault database: {e}")))))
+    } else if env::var("VAULT_IN_MEMORY").as_deref() == Ok("1") {
+        Some(Arc::new(MemoryStore::default()))
+    } else {
+        None
+    };
+    let vault = store.map(|store| Arc::new(Vault { store, hsm: hsm.clone(), network_tokens }));
+    eprintln!("card-service: token vault {}", if vault.is_some() { "on" } else { "off" });
+    let flow = CardFlow { hsm, host, timeouts, vault };
 
     let state = Arc::new(AppState { flow, fleet });
     let addr = env::var("CARD_SERVICE_ADDR").unwrap_or_else(|_| "127.0.0.1:7070".into());

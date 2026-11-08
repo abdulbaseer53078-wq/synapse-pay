@@ -13,7 +13,7 @@ from uuid import UUID
 from app.domain.terminal import (HEARTBEAT_WINDOW, TRANSITIONS, Actor, HealthState, TerminalStatus,
                                  device_fingerprint)
 
-UNCERTIFIED_FIRMWARE = "UNCERTIFIED_FIRMWARE"
+FIRMWARE_DOWNGRADE = "FIRMWARE_DOWNGRADE"
 
 TOKEN_TTL = timedelta(minutes=15)
 CHALLENGE_TTL = timedelta(minutes=15)
@@ -114,7 +114,10 @@ class TerminalRepository(Protocol):
 
 
 class CertificationRegistry(Protocol):
-    def is_certified(self, device_model: str, firmware_version: str) -> bool: ...
+    def denial(self, device_model: str, firmware: str | None, method: str | None = None,
+               card_network: str | None = None) -> str | None: ...
+    def is_downgrade(self, device_model: str, firmware_version: str) -> bool: ...
+    def acquirers(self, device_model: str, firmware: str, method: str, card_network: str | None) -> frozenset[str]: ...
 
 
 class CertificateAuthority(Protocol):
@@ -234,7 +237,10 @@ class RegistrationService:
             raise Conflict(f"a {ctx.status} terminal cannot send heartbeats")
 
         live = ctx.status != TerminalStatus.REVOKED  # a revoked terminal's heartbeat is logged, nothing more
-        uncertified = (live and hb.firmware_version != ctx.firmware_version
-                       and not self.certification.is_certified(ctx.device_model, hb.firmware_version))
+        # Step 26: a firmware change is recorded and audited; until that exact version is certified, every
+        # transaction is refused (authorization checks the matrix each time) and resumes once it is. Only a
+        # version below the model's minimum secure firmware suspends: that looks like a downgrade attack.
+        downgrade = (live and hb.firmware_version != ctx.firmware_version
+                     and self.certification.is_downgrade(ctx.device_model, hb.firmware_version))
         return self.repo.record_heartbeat(terminal_id, hb, update_terminal=live,
-                                          suspend_reason=UNCERTIFIED_FIRMWARE if uncertified else None)
+                                          suspend_reason=FIRMWARE_DOWNGRADE if downgrade else None)

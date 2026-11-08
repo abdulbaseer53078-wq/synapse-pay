@@ -41,6 +41,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 const PREFIX: &str = "sp1";
 const CHECKOUT_PREFIX: &str = "sp2";
+/// Vault ciphertexts, key version 1 (Step 29).
+const VAULT_PREFIX: &str = "sv1";
 const KSN_LEN: usize = 10;
 const NONCE_LEN: usize = 12;
 
@@ -69,6 +71,17 @@ impl std::fmt::Display for HsmError {
 pub struct ClearPan(Zeroizing<String>);
 
 impl ClearPan {
+    /// A PAN or network token from somewhere other than an envelope (the vault, a token service): checked the same.
+    pub fn from_digits(pan: &str) -> Result<Self, HsmError> {
+        if !(13..=19).contains(&pan.len()) || !pan.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(HsmError::InvalidContent("PAN must be 13 to 19 digits"));
+        }
+        if !luhn_ok(pan) {
+            return Err(HsmError::InvalidContent("PAN fails the Luhn check"));
+        }
+        Ok(ClearPan(Zeroizing::new(pan.to_owned())))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -108,6 +121,22 @@ pub trait Hsm: Send + Sync {
     fn checkout_public_jwk(&self) -> Option<String> {
         None
     }
+
+    /// Step 29: encrypts a PAN (or network token) for the vault, bound to its token so a ciphertext can't be
+    /// moved to another row. The key never leaves the HSM.
+    fn vault_seal(&self, _token: &str, _pan: &ClearPan) -> Result<String, HsmError> {
+        Err(HsmError::Malformed("this HSM has no vault key"))
+    }
+
+    fn vault_open(&self, _token: &str, _sealed: &str) -> Result<ClearPan, HsmError> {
+        Err(HsmError::Malformed("this HSM has no vault key"))
+    }
+
+    /// A keyed fingerprint of the card for one merchant (hex HMAC-SHA256). Keyed, because a PAN has so few
+    /// unknown digits that a plain hash is reversed by trying them all; PCI DSS 3.5.1 requires a keyed hash.
+    fn pan_fingerprint(&self, _merchant_id: &str, _pan: &ClearPan) -> Result<String, HsmError> {
+        Err(HsmError::Malformed("this HSM has no vault key"))
+    }
 }
 
 pub struct SimHsm {
@@ -134,6 +163,17 @@ impl SimHsm {
         }
         let bytes = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
         Self::new(bytes)
+    }
+
+    /// The vault's keys (Step 29).
+    /// shortcut: derived from the BDK with their own HKDF labels; a real HSM generates the vault KEK and the
+    /// fingerprint key on its own and never exports either. Rotation: a new label and prefix (sv2) per key version.
+    fn vault_key(&self, purpose: &str) -> Zeroizing<[u8; 32]> {
+        let mut key = Zeroizing::new([0u8; 32]);
+        Hkdf::<Sha256>::new(None, &self.bdk)
+            .expand(format!("synapsepay/vault/v1/{purpose}").as_bytes(), key.as_mut())
+            .expect("32 bytes is a valid HKDF-SHA256 length");
+        key
     }
 
     /// Enables sp2 (browser and app) envelopes with this private checkout key.
@@ -262,13 +302,7 @@ impl Hsm for SimHsm {
     fn decrypt_pan(&self, envelope: &str) -> Result<ClearPan, HsmError> {
         let clear = self.open(envelope, "data")?;
         let pan = std::str::from_utf8(&clear).map_err(|_| HsmError::InvalidContent("PAN is not text"))?;
-        if !(13..=19).contains(&pan.len()) || !pan.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(HsmError::InvalidContent("PAN must be 13 to 19 digits"));
-        }
-        if !luhn_ok(pan) {
-            return Err(HsmError::InvalidContent("PAN fails the Luhn check"));
-        }
-        Ok(ClearPan(Zeroizing::new(pan.to_owned())))
+        ClearPan::from_digits(pan)
     }
 
     fn verify_pin_block(&self, envelope: &str, pan: &ClearPan) -> Result<(), HsmError> {
@@ -301,6 +335,47 @@ impl Hsm for SimHsm {
 
     fn checkout_public_jwk(&self) -> Option<String> {
         self.checkout.as_ref().map(|k| k.public_key().to_jwk_string())
+    }
+
+    fn vault_seal(&self, token: &str, pan: &ClearPan) -> Result<String, HsmError> {
+        let mut nonce = [0u8; NONCE_LEN];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce);
+        let key = self.vault_key("kek");
+        let cipher = Aes256Gcm::new_from_slice(key.as_ref()).expect("32-byte key");
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce), Payload { msg: pan.as_str().as_bytes(), aad: token.as_bytes() })
+            .map_err(|_| HsmError::Malformed("vault encryption failed"))?;
+        let mut body = nonce.to_vec();
+        body.extend_from_slice(&ciphertext);
+        Ok(format!("{VAULT_PREFIX}.{}", B64.encode(body)))
+    }
+
+    fn vault_open(&self, token: &str, sealed: &str) -> Result<ClearPan, HsmError> {
+        let body = sealed.strip_prefix(VAULT_PREFIX).and_then(|rest| rest.strip_prefix('.'))
+            .ok_or(HsmError::Malformed("not a vault ciphertext of a known key version"))?;
+        let body = B64.decode(body).map_err(|_| HsmError::Malformed("ciphertext is not base64url"))?;
+        if body.len() <= NONCE_LEN + 16 {
+            return Err(HsmError::Malformed("ciphertext too short"));
+        }
+        let key = self.vault_key("kek");
+        let cipher = Aes256Gcm::new_from_slice(key.as_ref()).expect("32-byte key");
+        let (nonce, ciphertext) = body.split_at(NONCE_LEN);
+        let clear = Zeroizing::new(
+            cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad: token.as_bytes() })
+                .map_err(|_| HsmError::Undecryptable)?,
+        );
+        let pan = std::str::from_utf8(&clear).map_err(|_| HsmError::InvalidContent("PAN is not text"))?;
+        ClearPan::from_digits(pan)
+    }
+
+    fn pan_fingerprint(&self, merchant_id: &str, pan: &ClearPan) -> Result<String, HsmError> {
+        use hmac::Mac;
+        let key = self.vault_key("fingerprint");
+        let mut mac = <hmac::Hmac<Sha256> as Mac>::new_from_slice(key.as_ref()).expect("any key length");
+        mac.update(merchant_id.as_bytes());
+        mac.update(b"|");
+        mac.update(pan.as_str().as_bytes());
+        Ok(mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect())
     }
 }
 

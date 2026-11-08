@@ -87,9 +87,13 @@ class CardRequest:
     currency: str
     acquirer_terminal_id: str
     acquirer_merchant_id: str
-    encrypted_card_data: str
-    card_expiry: str
-    pin_block: str | None
+    encrypted_card_data: str = ""  # empty when paying with card_token
+    card_expiry: str = ""  # with card_token, empty means the saved card's expiry
+    pin_block: str | None = None
+    emv_data: str | None = None  # chip data (BER-TLV hex) for DE 55; spec 1.11.0
+    # Step 29: a saved card. card-service resolves it, for this platform merchant only, inside its own process.
+    card_token: str | None = None
+    merchant_id: str | None = None
     host_hint: list[str] = field(default_factory=list)  # acquirers to try, in order; empty: the connector's own
     trace_id: str | None = None  # passed to card-service, which logs it beside the STAN and RRN it sends
 
@@ -216,7 +220,7 @@ class TransactionService:
         transaction_id = claim.transaction_id
 
         # New request: check the terminal may take it, now. Denials are final for this attempt.
-        auth = self.authorization.authorize(caller_terminal, txn.payment_method, txn.amount)
+        auth = self.authorization.authorize(caller_terminal, txn.payment_method, txn.amount, txn.card_network)
         reason = auth.reason
         if reason is None and auth.profile is not None:
             day_start = (self.now() if self.now else datetime.now(LIMIT_DAY_ZONE)).astimezone(LIMIT_DAY_ZONE) \
@@ -237,6 +241,16 @@ class TransactionService:
             except NoHealthyHostError as exc:
                 error = system_error("HOST_UNAVAILABLE", str(exc), True)
                 return self.repo.finish(transaction_id, caller_terminal, None, "FAILED", error, store_response=False)
+            # Step 26: only acquirers this firmware is certified with for the payment's scheme may be asked.
+            # shortcut: without a routing engine, card-service picks the host, so this narrowing needs routing on.
+            if auth.acquirers is not None:
+                certified = tuple(h for h in plan.candidates if h in auth.acquirers)
+                if not certified:
+                    error = {"error_code": "FORBIDDEN",
+                             "error_message": "terminal not authorized: METHOD_NOT_CERTIFIED (no certified acquirer)",
+                             "error_category": "HARD_DECLINE", "retryable": False}
+                    return self.repo.finish(transaction_id, caller_terminal, None, "FAILED", error, store_response=True)
+                plan = replace(plan, host_id=certified[0], candidates=certified)
 
         request = MethodRequest(
             transaction_id=transaction_id, amount=txn.amount, currency=txn.currency,

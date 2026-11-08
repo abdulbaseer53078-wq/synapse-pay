@@ -103,9 +103,27 @@ def _database(admin_url: str, reset: bool) -> str:
         if conn.execute("SELECT to_regclass('public.merchants')").fetchone()[0] is None:
             for migration in sorted((ROOT / "db" / "migrations").glob("*.sql")):
                 conn.execute(migration.read_text())
-        elif conn.execute("SELECT to_regclass('public.payment_intents')").fetchone()[0] is None:
+        elif conn.execute("SELECT to_regclass('public.certifications')").fetchone()[0] is None:
             sys.exit("The sandbox database is from an older version: run with --reset.")
+        certify_sandbox_firmware(conn)
     return url
+
+
+# Sandbox only (Step 26): the simulated terminals' firmware, certified for every scheme on every sandbox host.
+# Real certifications come from the admin API, one row per exact version, scheme and acquirer.
+SANDBOX_FIRMWARE = {"PAX A920 Pro": ("2.4.1", "2.5.0"), "Sunmi P2": ("1.8.0",)}
+SANDBOX_ACQUIRERS = ("acquirer_a", "acquirer_b", "psp_1", "psp_2", "acquirer_x", "upi_psp")
+
+
+def certify_sandbox_firmware(conn, acquirers=SANDBOX_ACQUIRERS) -> None:
+    for model, versions in SANDBOX_FIRMWARE.items():
+        for version in versions:
+            for scheme in ("VISA", "MASTERCARD", "RUPAY", "AMEX", "NPCI_UPI"):
+                for acquirer in acquirers:
+                    conn.execute(
+                        "INSERT INTO certifications (device_model, firmware_version, scheme, acquirer_id,"
+                        " certificate_number, valid_until) VALUES (%s, %s, %s, %s, 'SANDBOX', now() + interval '10 years')"
+                        " ON CONFLICT DO NOTHING", (model, version, scheme, acquirer))
 
 
 def _drain(stream) -> None:

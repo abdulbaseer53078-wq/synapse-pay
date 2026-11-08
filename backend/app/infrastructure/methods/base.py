@@ -58,7 +58,8 @@ class BaseMethodAdapter(ABC):
             return self.DETAILS.model_validate(details).model_dump(exclude_none=True)
         except ValidationError as exc:
             raise InvalidMethodDetails("; ".join(
-                f"method_details.{'.'.join(map(str, error['loc']))}: {error['msg']}"
+                # A whole-object rule (no field location) reads "method_details: ...", not "method_details.: ...".
+                f"{'.'.join(('method_details', *map(str, error['loc'])))}: {error['msg']}"
                 for error in exc.errors())) from exc
 
     def initiate(self, request: MethodRequest) -> MethodResult:
