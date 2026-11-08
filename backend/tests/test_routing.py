@@ -147,10 +147,17 @@ def test_cascade_stops_after_two_retries():
     assert result.status == "FAILED" and len(trail) == 3
 
 
-def test_pending_without_a_next_action_cascades():
-    """A provider that timed out after sending may have our money: try the backup so the payment still happens."""
-    result, trail = cascade(["a", "b"], lambda host: MethodResult(status="PENDING") if host == "a" else _ok(host))
-    assert result.method_reference == "ref_b" and len(trail) == 2
+def test_an_unknown_outcome_never_cascades():
+    """Step 19: a host that timed out and couldn't be reversed may have approved. Asking a second host could
+    charge the customer twice, so the payment stays PENDING for reconciliation, even when the error says
+    retryable."""
+    unknown = MethodResult(status="PENDING")
+    unknown_marked_retryable = MethodResult(status="PENDING", error={"error_code": "HOST_TIMEOUT", "retryable": True})
+    for first in (unknown, unknown_marked_retryable):
+        asked = []
+        result, trail = cascade(["a", "b"], lambda host: asked.append(host) or (first if host == "a" else _ok(host)))
+        assert result is first and asked == ["a"] and len(trail) == 1
+        assert trail[0]["retryable"] is False
 
 
 def test_pending_awaiting_the_customer_does_not_cascade():

@@ -35,6 +35,7 @@ fn request(amount: u64) -> CardRequest {
         card_expiry: "08/28".into(),
         pin_block: None,
         host_hint: Vec::new(),
+        trace_id: None,
     }
 }
 
@@ -168,7 +169,7 @@ async fn http_api() {
     // No pools: the mock answers the transaction, and the fleet-health route reports an empty fleet.
     let app = card_service::http::app(Arc::new(AppState {
         flow: flow(host),
-        fleet: Arc::new(Fleet::new(HashMap::new())),
+        fleet: Arc::new(Fleet::new(HashMap::new(), Arc::new(host_connector::stan::StanSource::single()))),
     }));
     let body = serde_json::json!({
         "transaction_id": "txn_http", "kind": "PURCHASE", "amount": 50000, "currency": "INR",

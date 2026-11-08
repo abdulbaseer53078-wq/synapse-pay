@@ -10,6 +10,7 @@ Two jobs, kept apart on purpose:
 Cards are the exception to host choice: Rust owns the sockets and the breakers, so for CARD the engine emits the
 *preferred order* and lets the card service pick inside it. Python decides the shortlist, Rust decides the link.
 """
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Protocol
 
@@ -111,26 +112,28 @@ def cascade(hosts: Iterable[str], attempt: Callable[[str], MethodResult],
             max_retries: int = MAX_RETRIES) -> tuple[MethodResult, list[dict]]:
     """Try hosts in order until a non-retryable answer. Returns the result and the trail for the audit log.
 
-    `attempt` performs one transaction against one host. A retryable failure (timeout, soft decline, provider
-    5xx) moves to the next host; anything else stops immediately, because a hard decline will be the same answer
-    from every acquirer and the customer should not wait for three of them.
+    `attempt` performs one transaction against one host. A retryable failure (a timeout that was reversed, a
+    soft decline, a host that was never reached) moves to the next host; anything else stops immediately,
+    because a hard decline will be the same answer from every acquirer and the customer should not wait for
+    three of them.
     """
     trail: list[dict] = []
     last: MethodResult | None = None
     for index, host in enumerate(list(hosts)[: max_retries + 1]):
+        started = time.monotonic()
         result = attempt(host)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
         last = result
-        # PENDING is two different situations. With a next_action the customer is mid-flow (a UPI collect is
-        # ringing their phone): retrying would send a second collect and they would see two PIN prompts. Without
-        # one, nobody knows what happened — the provider may have timed out after sending — so the backup is the
-        # only way the payment still happens.
-        retryable = bool(result.error and result.error.get("retryable")) or (
-            result.status == "PENDING" and result.next_action is None)
+        # PENDING never moves on. With a next_action the customer is mid-flow (a UPI collect is ringing their
+        # phone): a second host would mean a second PIN prompt. Without one, the outcome is unknown: the host may
+        # have approved and its reversal didn't get through, so a second host could charge the customer twice
+        # (Step 19). The payment stays PENDING until reconciliation or the polling fallback settles it.
+        retryable = result.status != "PENDING" and bool(result.error and result.error.get("retryable"))
         # `asked` and `host` start the same. They diverge only when the adapter reports a different `host_used`,
         # which is the point of recording both: the audit trail must say what we asked for *and* what answered.
         trail.append({"asked": host, "host": host, "status": result.status, "retryable": retryable,
                       "error": (result.error or {}).get("error_code"),
-                      "error_category": (result.error or {}).get("error_category")})
+                      "error_category": (result.error or {}).get("error_category"), "elapsed_ms": elapsed_ms})
         if not retryable:
             return result, trail
     return last or MethodResult(status="FAILED"), trail

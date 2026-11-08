@@ -1,0 +1,36 @@
+# promtool test rules alerts.test.yml (see README in this folder's parent, docker-compose observability profile)
+rule_files: [alerts.yml]
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'host_attempts_total{host="psp_1",outcome="answered"}'
+        values: '0+7x15'
+      - series: 'host_attempts_total{host="psp_1",outcome="failed"}'
+        values: '0+3x15'
+      - series: 'host_attempts_total{host="psp_2",outcome="answered"}'
+        values: '0+10x15'
+      - series: 'host_up{host="psp_1",rail="CARD"}'
+        values: '1x15'
+      - series: 'host_up{host="upi_a",rail="UPI"}'
+        values: '1 1 0x13'
+      - series: 'cascade_total{outcome="recovered"}'
+        values: '0+9x15'
+      - series: 'cascade_total{outcome="exhausted"}'
+        values: '0+1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: AcquirerSuccessRateLow
+        exp_alerts:
+          - exp_labels: { severity: page, host: psp_1 }
+            exp_annotations: { summary: "psp_1 answered under 80% of attempts for 5 minutes" }
+      - eval_time: 12m
+        alertname: AllHostsDownForRail
+        exp_alerts:
+          - exp_labels: { severity: page, rail: UPI }
+            exp_annotations: { summary: "Every UPI host is down: that rail can't take payments" }
+      - eval_time: 12m
+        alertname: CascadeSuccessRateLow
+        exp_alerts:
+          - exp_labels: { severity: page }
+            exp_annotations: { summary: "Backups saved under 95% of failed-over payments for 5 minutes" }

@@ -1,0 +1,10 @@
+# Step 18: scrapes the API's metrics port (METRICS_PORT, run on the host) and evaluates the failover alerts.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+rule_files: [/etc/prometheus/alerts.yml]
+alerting:
+  alertmanagers: [{ static_configs: [{ targets: ["alertmanager:9093"] }] }]
+scrape_configs:
+  - job_name: api
+    static_configs: [{ targets: ["host.docker.internal:9464"] }]  # METRICS_PORT=9464

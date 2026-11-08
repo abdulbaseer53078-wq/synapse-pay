@@ -1,5 +1,5 @@
 import { HttpClient, type ClientOptions } from "./client.js";
-import type { PaymentIntent, PaymentIntentCreateParams } from "./types.js";
+import type { PaymentIntent, PaymentIntentCreateParams, RecoveryStats } from "./types.js";
 import { constructEvent } from "./webhooks.js";
 
 export * from "./errors.js";
@@ -32,12 +32,24 @@ class PaymentIntents {
   }
 }
 
+class Merchants {
+  constructor(private readonly http: HttpClient) {}
+
+  /** What failover saved you over the last `days` (1–90, default 30). */
+  recoveryStats(options: { days?: number } = {}): Promise<RecoveryStats> {
+    return this.http.request<RecoveryStats>("GET", `/api/v1/merchants/me/recovery-stats?days=${options.days ?? 30}`);
+  }
+}
+
 export class SynapsePay {
   readonly paymentIntents: PaymentIntents;
+  readonly merchants: Merchants;
   readonly webhooks = { constructEvent };
 
   constructor(secretKey: string, options: ClientOptions = {}) {
-    this.paymentIntents = new PaymentIntents(new HttpClient(secretKey, options));
+    const http = new HttpClient(secretKey, options);
+    this.paymentIntents = new PaymentIntents(http);
+    this.merchants = new Merchants(http);
   }
 }
 

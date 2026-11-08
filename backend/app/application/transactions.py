@@ -17,6 +17,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from app.application.authorization import AuthorizationService
+from app.application import observability
 from app.application.hosts import NoHealthyHostError
 from app.application.methods import (AdapterUnavailable, InvalidMethodDetails, MethodRegistry, MethodRequest,
                                      MethodResult, OutcomeUnknown)
@@ -90,6 +91,7 @@ class CardRequest:
     card_expiry: str
     pin_block: str | None
     host_hint: list[str] = field(default_factory=list)  # acquirers to try, in order; empty: the connector's own
+    trace_id: str | None = None  # passed to card-service, which logs it beside the STAN and RRN it sends
 
 
 class CardOutcomeUnknown(Exception):
@@ -136,7 +138,7 @@ class TransactionRepository(Protocol):
     def mark_pending(self, transaction_id: UUID, terminal_id: UUID) -> None: ...
     def finish(self, transaction_id: UUID, terminal_id: UUID, result: MethodResult | None, status: str,
                error: dict | None, store_response: bool,
-               attempts: list[dict] | None = None) -> dict: ...
+               attempts: list[dict] | None = None, trace_id: str | None = None) -> dict: ...
 
 
 def request_hash(body: dict[str, Any]) -> bytes:
@@ -174,7 +176,7 @@ class TransactionService:
     # the single-attempt path, which is what a service without routing rules (and most unit tests) should do.
     routing: RoutingEngine | None = None
 
-    def create(self, caller_terminal: UUID | None, body: dict[str, Any]) -> dict:
+    def create(self, caller_terminal: UUID | None, body: dict[str, Any], trace_id: str | None = None) -> dict:
         """`body` is the validated request (JSON-ready). Returns the TransactionResponse to send with 201."""
         if caller_terminal is None:
             # shortcut: merchant backends (OAuth) arrive with the Merchant SDK (Step 6).
@@ -239,7 +241,7 @@ class TransactionService:
         request = MethodRequest(
             transaction_id=transaction_id, amount=txn.amount, currency=txn.currency,
             capture_mode=txn.capture_mode, merchant_id=merchant, terminal_id=caller_terminal,
-            details=details, customer_ref=body.get("customer_ref"), metadata=txn.metadata)
+            details=details, customer_ref=body.get("customer_ref"), metadata=txn.metadata, trace_id=trace_id)
         self.repo.mark_pending(transaction_id, caller_terminal)
         try:
             # Cascade only where a hint can actually change who is asked. A rail bound to one provider must
@@ -257,9 +259,11 @@ class TransactionService:
                 if result.host_used and trail and result.status != "FAILED":
                     trail[-1]["asked"] = hosts_tried[-1]
                     trail[-1]["host"] = result.host_used
+                if trace_id:
+                    observability.record_cascade(trail, trace_id)
                 return self.repo.finish(
                     transaction_id, caller_terminal, result, result.status, result.error,
-                    store_response=not result.retryable, attempts=trail)
+                    store_response=not result.retryable, attempts=trail, trace_id=trace_id)
             result = adapter.initiate(request)
         except AdapterUnavailable as exc:
             error = system_error("INTERNAL_ERROR", exc.message, True)

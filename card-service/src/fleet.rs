@@ -9,33 +9,53 @@
 //! * **One STAN per transaction.** DE 11 is what ties a request to its response and to any reversal built from
 //!   it. Minting a second STAN for a retry would put two transactions on the wire for one customer payment, and
 //!   the clearing file can only reconcile one of them. The STAN is minted once, above the loop.
-//! * **Cascade only when the outcome is unknown.** A host that times out may have approved the payment, so the
-//!   next host is tried; a host that answers with a decline is the answer, and retrying it elsewhere would only
-//!   ask the same question twice.
+//! * **Move on only when the request was never sent.** A host that is down or refuses the request
+//!   (`Unavailable`) has done nothing, so the next host is tried. A host that times out or drops the connection
+//!   may have approved the payment: asking a second host could charge the card twice, so the fleet stops and
+//!   returns the unknown outcome for the caller to resolve (Step 19). A decline is an answer, never a reason to
+//!   move on.
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use host_connector::pool::IsoHostPool;
+use host_connector::stan::StanSource;
 use host_connector::{BoxFuture, HostConnector, HostError, HostResponse, HostState, HostStatus, RequestContext,
                      Transaction};
 
+/// Where the fleet's events go: one JSON object per call (stdout by default; tests capture them).
+pub type EventSink = Arc<dyn Fn(serde_json::Value) + Send + Sync>;
+
 pub struct Fleet {
     pub pools: HashMap<String, Arc<IsoHostPool>>,
-    next_stan: AtomicU32,
+    stans: Arc<StanSource>,
+    events: EventSink,
 }
 
 impl Fleet {
-    pub fn new(pools: HashMap<String, Arc<IsoHostPool>>) -> Self {
-        Self { pools, next_stan: AtomicU32::new(1) }
+    /// `stans` must be the source the pools were started with (`IsoHostPool::start_with_stans`): then a
+    /// transaction's STAN can't collide with a pool's echo, and slots keep other card-service instances apart.
+    pub fn new(pools: HashMap<String, Arc<IsoHostPool>>, stans: Arc<StanSource>) -> Self {
+        Self { pools, stans, events: Arc::new(|event| println!("{event}")) }
     }
 
-    /// Same formatting as `IsoHostConnector::next_stan`, so a STAN minted here can never collide with one minted
-    /// by a connector: six digits, 1..=999_999.
+    pub fn with_event_sink(mut self, events: EventSink) -> Self {
+        self.events = events;
+        self
+    }
+
     fn mint_stan(&self) -> String {
-        let value = self.next_stan.fetch_add(1, Ordering::Relaxed);
-        format!("{:06}", (value % 999_999) + 1)
+        self.stans.next()
+    }
+}
+
+/// HostError in the shared failover-event vocabulary.
+fn failure_reason(error: &HostError) -> &'static str {
+    match error {
+        HostError::Timeout => "TIMEOUT",
+        HostError::ConnectionLost(_) => "CONNECTION_LOST",
+        HostError::Protocol(_) => "PROTOCOL_ERROR",
+        HostError::Unavailable(_) => "UNAVAILABLE",
     }
 }
 
@@ -51,7 +71,7 @@ impl HostConnector for Fleet {
                 ctx.host_hint.clone()
             };
 
-            // Only hosts that exist and have a live socket: a skipped host must not consume a timeout slice.
+            // Only hosts that exist and have a live socket: a host with no socket is skipped, not waited on.
             // Ordered as the caller asked, so the routing engine's preference order survives.
             let candidates: Vec<(&String, &Arc<IsoHostPool>)> = hint.iter()
                 .filter_map(|host_id| self.pools.get(host_id).map(|pool| (host_id, pool)))
@@ -60,36 +80,55 @@ impl HostConnector for Fleet {
             if candidates.is_empty() {
                 return Err(HostError::Unavailable("no host in the hint is up".into()));
             }
+            // The caller's first choice is down, so the payment starts on a backup: that is a failover too.
+            if let (Some(first), Some((to, _))) = (ctx.host_hint.first(), candidates.first()) {
+                if first != *to {
+                    (self.events)(serde_json::json!({
+                        "event": "FAILOVER_TRIGGERED", "layer": "HOST", "trace_id": ctx.trace_id,
+                        "from_path": first, "to_path": to, "reason": "UNAVAILABLE", "latency_lost_ms": 0,
+                    }));
+                }
+            }
 
-            // Split the caller's deadline across the hosts that are left. Without this, the first host can
-            // spend the whole budget and the backup never gets a chance to answer. The caller still gets one
-            // overall deadline; it is the fleet's job to divide it, not to multiply it by the number of hosts.
-            let total = candidates.len();
-            let mut unknown: Option<HostError> = None;
-            for (index, (host_id, pool)) in candidates.into_iter().enumerate() {
+            // Each host gets whatever is left of the caller's one deadline. It isn't split: a timeout ends the
+            // attempt, so a slice would only turn answers into unknown outcomes. Only "never sent" moves on, and fast.
+            // The host that just failed, why, and how long it took: reported once we know where the payment went.
+            let mut failed: Option<(String, &'static str, u128)> = None;
+            for (host_id, pool) in candidates {
                 let remaining = ctx.deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     break;
                 }
-                let mut attempt = ctx.clone();
-                attempt.deadline = Instant::now() + remaining / (total - index) as u32;
-                match pool.send_with_stan(&attempt, txn, stan.clone()).await {
+                if let Some((from, reason, lost_ms)) = failed.take() {
+                    (self.events)(serde_json::json!({
+                        "event": "FAILOVER_TRIGGERED", "layer": "HOST", "trace_id": ctx.trace_id,
+                        "from_path": from, "to_path": host_id, "reason": reason, "latency_lost_ms": lost_ms,
+                    }));
+                }
+                let started = Instant::now();
+                let sent = pool.send_with_stan(ctx, txn, stan.clone()).await;
+                if let Err(error) = &sent {
+                    let reason = failure_reason(error);
+                    let lost_ms = started.elapsed().as_millis();
+                    // The STAN joins this to the redacted ISO 8583 audit records and the acquirer's own logs.
+                    (self.events)(serde_json::json!({
+                        "event": "HOST_ATTEMPT_FAILED", "trace_id": ctx.trace_id, "host": host_id,
+                        "stan": stan, "reason": reason, "latency_ms": lost_ms,
+                    }));
+                    failed = Some((host_id.clone(), reason, lost_ms));
+                }
+                match sent {
                     Ok(mut response) => {
                         // The truth for the audit trail: not the host we asked for, the host that answered.
                         response.host_used = host_id.clone();
                         return Ok(response);
                     }
-                    Err(error) if error.outcome_unknown() => {
-                        // The host may have acted. Remember it: a later "unavailable" must not turn an unknown
-                        // outcome into a clean failure the caller would happily retry.
-                        unknown = Some(error);
-                    }
-                    Err(error) => return Err(unknown.unwrap_or(error)),
+                    // The host may have acted: stop here rather than risk a second charge elsewhere.
+                    Err(error) if error.outcome_unknown() => return Err(error),
+                    Err(_) => {} // never sent: the next host is safe to ask
                 }
             }
-            Err(unknown.unwrap_or_else(|| {
-                HostError::Unavailable("no host in the hint accepted the transaction before the deadline".into())
-            }))
+            Err(HostError::Unavailable("no host in the hint accepted the transaction before the deadline".into()))
         })
     }
 

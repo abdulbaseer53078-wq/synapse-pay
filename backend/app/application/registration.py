@@ -120,8 +120,9 @@ class CertificationRegistry(Protocol):
 class CertificateAuthority(Protocol):
     ca_certificate_pem: str
 
-    def issue(self, csr_pem: str, terminal_id: UUID) -> IssuedCertificate:
-        """Raises InvalidInput for an unparsable CSR, a bad CSR signature or an unsupported key."""
+    def issue(self, csr_pem: str, terminal_id: UUID, uri: str | None = None) -> IssuedCertificate:
+        """Raises InvalidInput for an unparsable CSR, a bad CSR signature or an unsupported key. `uri` is the
+        URI SAN (default: the terminal's); edge nodes (Step 20) get theirs, with their id as `terminal_id`."""
     def verify_signature(self, public_key_pem: str, message: bytes, signature: bytes) -> bool: ...
     def revoke(self, serial_number: str) -> None:
         """Idempotent. Raises CertificateAuthorityUnavailable if the revocation was not published."""

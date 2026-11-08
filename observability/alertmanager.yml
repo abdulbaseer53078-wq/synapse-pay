@@ -1,0 +1,8 @@
+# Pages go to PagerDuty. The integration key is a file (docker secret), never in this config.
+route:
+  receiver: pagerduty
+  group_by: [alertname, host, rail]
+receivers:
+  - name: pagerduty
+    pagerduty_configs:
+      - routing_key_file: /run/secrets/pagerduty_routing_key

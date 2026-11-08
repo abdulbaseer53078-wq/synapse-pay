@@ -9,3 +9,35 @@ services:
     image: apache/kafka:3.9.1  # single-node KRaft broker, local dev only
     ports:
       - "9092:9092"
+
+  # Step 18: `docker compose --profile observability up`, with the API run with METRICS_PORT=9464.
+  # Put the PagerDuty integration key in observability/pagerduty_routing_key (git-ignored) first.
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [observability]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    ports:
+      - "9090:9090"
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    profiles: [observability]
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    secrets: [pagerduty_routing_key]
+  grafana:
+    image: grafana/grafana:12.1.1
+    profiles: [observability]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"  # local dev only
+    volumes:
+      - ./observability/grafana/datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - ./observability/grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/synapsepay.yml:ro
+      - ./observability/grafana/failover.json:/etc/grafana/dashboards/failover.json:ro
+    ports:
+      - "3001:3000"  # 3000 is the node-shop example
+secrets:
+  pagerduty_routing_key:
+    file: ./observability/pagerduty_routing_key

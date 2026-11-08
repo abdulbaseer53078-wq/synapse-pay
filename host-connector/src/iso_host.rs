@@ -18,7 +18,7 @@
 //! them (or the reversal queue) when reversals move to a background job.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU32, Ordering};
+use crate::stan::StanSource;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -114,7 +114,7 @@ pub struct IsoHostConnector {
     link: Link,
     config: Arc<IsoHostConfig>,
     pending: Pending,
-    stan: Arc<AtomicU32>,
+    stan: Arc<StanSource>,
     originals: Originals,
     reader: JoinHandle<()>,
 }
@@ -122,13 +122,13 @@ pub struct IsoHostConnector {
 impl IsoHostConnector {
     /// Takes over the link's event stream. Must be called inside a Tokio runtime.
     pub fn new(link: Link, events: mpsc::Receiver<LinkEvent>, config: impl Into<Arc<IsoHostConfig>>) -> Self {
-        Self::with_stans(link, events, config.into(), Arc::default(), Originals::default())
+        Self::with_stans(link, events, config.into(), Arc::new(StanSource::single()), Originals::default())
     }
 
     /// Like `new`, drawing STANs from a counter shared with the host's other connections, so no two
     /// in-flight requests to one host ever carry the same STAN.
     pub(crate) fn with_stans(link: Link, events: mpsc::Receiver<LinkEvent>, config: Arc<IsoHostConfig>,
-                             stan: Arc<AtomicU32>, originals: Originals) -> Self {
+                             stan: Arc<StanSource>, originals: Originals) -> Self {
         let pending = Pending::default();
         let reader = tokio::spawn(read_responses(events, config.clone(), pending.clone()));
         Self { link, config, pending, stan, originals, reader }
@@ -139,7 +139,7 @@ impl IsoHostConnector {
     }
 
     fn next_stan(&self) -> String {
-        format!("{:06}", self.stan.fetch_add(1, Ordering::Relaxed) % 999_999 + 1)
+        self.stan.next()
     }
 
     /// Sends one framed request and returns the raw response with the same STAN, auditing both.

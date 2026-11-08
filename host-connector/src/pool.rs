@@ -7,7 +7,7 @@
 //! All connections draw STANs from one counter, so no two in-flight requests to the host share a STAN.
 
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicU32;
+use crate::stan::StanSource;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -87,8 +87,14 @@ impl IsoHostPool {
     /// Opens `pool.size` connections (they connect in the background; see [`wait_ready`](Self::wait_ready))
     /// and starts their echo loops. Must be called inside a Tokio runtime.
     pub fn start(link: LinkConfig, iso: IsoHostConfig, pool: PoolConfig) -> Result<Self, LinkError> {
+        Self::start_with_stans(link, iso, pool, Arc::new(StanSource::single()))
+    }
+
+    /// Like `start`, drawing echo STANs from `stans`, the source the process's transactions also use, so an
+    /// echo and a payment can never carry the same STAN to the host.
+    pub fn start_with_stans(link: LinkConfig, iso: IsoHostConfig, pool: PoolConfig, stans: Arc<StanSource>)
+        -> Result<Self, LinkError> {
         let iso = Arc::new(iso);
-        let stans = Arc::new(AtomicU32::new(0));
         let originals = Originals::default();
         let conns = (0..pool.size.max(1))
             .map(|_| {

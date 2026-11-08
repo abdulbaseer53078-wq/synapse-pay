@@ -46,7 +46,10 @@ static_resources:
                               disabled: true
                         - match: { prefix: "/api/" }
                           route: { cluster: backend }
-                        # Nothing else (notably /internal/*) is reachable through the gateway.
+                        # Edge nodes' own API (Step 20); the authz check admits only edge certificates here.
+                        - match: { prefix: "/internal/v1/edge/" }
+                          route: { cluster: backend }
+                        # Nothing else (notably the rest of /internal/*) is reachable through the gateway.
                 http_filters:
                   - name: envoy.filters.http.ext_authz
                     typed_config:
@@ -59,7 +62,7 @@ static_resources:
                         authorization_request:
                           allowed_headers: { patterns: [{ exact: x-forwarded-client-cert }] }
                         authorization_response:
-                          allowed_upstream_headers: { patterns: [{ exact: x-terminal-id }] }
+                          allowed_upstream_headers: { patterns: [{ exact: x-terminal-id }, { exact: x-edge-node-id }] }
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

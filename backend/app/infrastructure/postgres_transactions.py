@@ -180,7 +180,8 @@ class PostgresTransactionRepository:
             _audit(conn, terminal_id, transaction_id, "transaction.send", "INITIATED", "PENDING")
 
     def finish(self, transaction_id: UUID, terminal_id: UUID, result: MethodResult | None, status: str,
-               error: dict | None, store_response: bool, attempts: list[dict] | None = None) -> dict:
+               error: dict | None, store_response: bool, attempts: list[dict] | None = None,
+               trace_id: str | None = None) -> dict:
         with self.pool.connection() as conn, conn.transaction():
             (previous,) = conn.execute("SELECT status FROM transactions WHERE transaction_id = %s FOR UPDATE",
                                        (transaction_id,)).fetchone()
@@ -219,6 +220,6 @@ class PostgresTransactionRepository:
             # The cascade's attempt trail is written in this same transaction as the final state, so a rollback
             # takes both: the log can never claim a host was tried for a transaction that never happened.
             _audit(conn, terminal_id, transaction_id, "transaction.finish", previous, status, reason,
-                   payload={"attempts": attempts} if attempts else None)
+                   payload={k: v for k, v in (("attempts", attempts), ("trace_id", trace_id)) if v} or None)
             return response
 

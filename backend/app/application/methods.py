@@ -98,6 +98,7 @@ class MethodRequest:
     details: dict
     customer_ref: str | None = None
     metadata: dict = field(default_factory=dict)
+    trace_id: str | None = None  # Propagated from SDK/API for observability
     # The hosts this attempt may use, in preference order. The engine sets one host per cascade attempt; an
     # adapter that cannot choose a host (UPI, wallet) ignores it, and the card adapter forwards it to Rust.
     host_hint: list[str] = field(default_factory=list)

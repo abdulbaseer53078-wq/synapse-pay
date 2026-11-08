@@ -15,6 +15,7 @@ pub mod iso_host;
 pub mod link;
 pub mod mock;
 pub mod pool;
+pub mod stan;
 pub mod unified;
 
 /// A boxed future, so the trait stays usable as `dyn HostConnector` without an async-trait dependency.

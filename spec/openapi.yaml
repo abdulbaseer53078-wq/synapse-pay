@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.8.1
+  version: 1.9.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
     goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions.
@@ -237,6 +237,28 @@ paths:
                   y: { type: string }
         4XX: { $ref: '#/components/responses/Error' }
         5XX: { $ref: '#/components/responses/Error' }
+  /v1/merchants/me/recovery-stats:
+    get:
+      operationId: getRecoveryStats
+      summary: Payments a backup acquirer saved (merchant server)
+      description: >-
+        Counted from the audit trail: a payment is cascaded when it was tried on more than one acquirer, and
+        recovered when a backup approved it. Only the calling merchant's payments.
+      security:
+        - SecretKey: []
+      parameters:
+        - name: days
+          in: query
+          description: Window, counted back from now.
+          schema: { type: integer, minimum: 1, maximum: 90, default: 30 }
+      responses:
+        '200':
+          description: The stats.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecoveryStats' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
   /v1/terminals:
     get:
       operationId: listTerminals
@@ -624,6 +646,12 @@ paths:
         exact bytes with the terminal's registration key. The cloud repeats the same steps and verifies against
         the certificate's public key. Any other serialisation (pretty-printed, keys in insertion order,
         floats reformatted) produces different bytes and fails — which is the point: there is one encoding.
+
+        **Edge nodes (1.9.0).** An on-premise edge node uploads sales it accepted for its merchant's terminals
+        with its own certificate. Each item then carries `edge_node_id`, is signed with the edge node's key,
+        and is checked against the edge node's own signed offline limits; `terminal_id` names the till that took
+        the sale and must belong to the edge node's merchant. Per-item reason `EDGE_MISMATCH`: the item names
+        another edge node or merchant.
       security:
         - MutualTLS: []
         - OAuth2ClientCredentials: [transactions:write]
@@ -671,6 +699,12 @@ paths:
                           from method_details: inference is how per-method branching creeps back into the engine,
                           and a misread shape would dispatch a card sale to UPI.
                       method_details: { $ref: '#/components/schemas/TransactionRequest/properties/method_details' }
+                      edge_node_id:
+                        type: string
+                        format: uuid
+                        description: >-
+                          Since 1.9.0. Set when an edge node queued the sale; must be the edge node whose
+                          certificate uploads the batch, and the item is then signed with that edge node's key.
                       signature:
                         type: string
                         description: >-
@@ -1372,6 +1406,24 @@ components:
             card_expiry: { type: string, pattern: '^(0[1-9]|1[0-2])/[0-9]{2}$' }
             card_network: { type: string, enum: [VISA, MASTERCARD, RUPAY, AMEX] }
             cardholder_name: { type: string, description: PII; not stored. }
+    RecoveryStats:
+      type: object
+      additionalProperties: false
+      required: [since, cascaded, recovered, recovered_amount]
+      properties:
+        since: { type: string, format: date-time }
+        cascaded: { type: integer, minimum: 0, description: Payments tried on more than one acquirer. }
+        recovered: { type: integer, minimum: 0, description: Of those, approved by a backup. }
+        recovered_amount:
+          type: array
+          description: Value of the recovered payments, per currency, in minor units.
+          items:
+            type: object
+            additionalProperties: false
+            required: [currency, amount]
+            properties:
+              currency: { type: string, pattern: '^[A-Z]{3}$' }
+              amount: { type: integer, minimum: 1 }
     PaymentIntent:
       type: object
       required: [id, status, amount, currency, capture_mode, created_at, updated_at, expires_at]
