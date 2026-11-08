@@ -39,7 +39,13 @@ jobs:
       - run: pip install -r backend/requirements.txt
       - name: Backend tests (unit, integration, end to end, chaos)
         working-directory: backend
-        run: python -m pytest -q -rs --ignore=tests/test_checkout_browser.py
+        # Failures are re-printed as ::error:: annotations: they're public, unlike the job log.
+        shell: bash
+        run: |
+          python -m pytest -q -rfEs --ignore=tests/test_checkout_browser.py | tee "$RUNNER_TEMP/pytest.out"
+          rc=${PIPESTATUS[0]}
+          grep -E "^(FAILED|ERROR) " "$RUNNER_TEMP/pytest.out" | sed 's/^/::error title=backend::/' || true
+          exit "$rc"
 
   rust:
     runs-on: ubuntu-24.04
@@ -99,7 +105,12 @@ jobs:
           node-version: "22"
       - name: Terminal transport (Java 8 build, chaos and mesh tests)
         working-directory: sdks/terminal-transport
-        run: sh run-tests.sh
+        shell: bash
+        run: |
+          sh run-tests.sh 2>&1 | tee "$RUNNER_TEMP/terminal.out"
+          rc=${PIPESTATUS[0]}
+          grep -A1 -E "^FAIL|error:" "$RUNNER_TEMP/terminal.out" | sed 's/^/::error title=terminal-transport::/' || true
+          exit "$rc"
       - name: Node SDK
         working-directory: sdks/node
         run: npm ci && npm test
