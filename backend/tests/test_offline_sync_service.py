@@ -13,7 +13,9 @@ from fastapi.testclient import TestClient
 
 from app.api import errors as errors_module
 from app.api import transactions as transactions_api
+from app.application.edge import EdgeNode, OfflineLimits
 from app.application.offline_sync import canonical_item
+from app.application.registration import RegistrationError
 from app.application.transaction_sync import OfflineSyncService
 from app.application.methods import MethodRegistry
 from app.infrastructure.methods.offline import OFFLINE_CAPABILITIES, OfflineMethodAdapter
@@ -133,6 +135,10 @@ class FakeService:
         self.calls.append(len(items))
         return [{"offline_reference": i["offline_reference"], "status": "PENDING"} for i in items]
 
+    def sync_edge(self, edge_node_id, items):
+        self.calls.append(("edge", str(edge_node_id), len(items)))
+        return []
+
 
 @pytest.fixture
 def client():
@@ -165,3 +171,83 @@ def test_the_route_caps_the_batch_at_100(client):
 def test_the_route_requires_a_terminal_certificate(client):
     http, _ = client
     assert http.post("/api/v1/transactions/sync", json=_body(1)).status_code == 401
+
+
+def test_the_route_takes_an_edge_nodes_batch_and_ignores_the_gateways_placeholder(client):
+    http, app = client
+    edge = str(uuid4())
+    r = http.post("/api/v1/transactions/sync", json=_body(3), headers={"x-terminal-id": "-", "x-edge-node-id": edge})
+    assert r.status_code == 200
+    assert app.state.offline_sync.calls == [("edge", edge, 3)]
+    both_placeholders = {"x-terminal-id": "-", "x-edge-node-id": "-"}
+    assert http.post("/api/v1/transactions/sync", json=_body(1), headers=both_placeholders).status_code == 401
+
+
+# --- an edge node's batch (Step 21) ------------------------------------------------------------------------
+
+EDGE, MERCHANT = uuid4(), uuid4()
+
+
+class FakeEdges:
+    def __init__(self, pem, status="ACTIVE"):
+        self.pem, self.status = pem, status
+
+    def get(self, edge_node_id):
+        if edge_node_id != EDGE:
+            return None
+        return EdgeNode(EDGE, MERCHANT, self.status, 3,
+                        OfflineLimits(per_transaction=100_000, per_day=500_000, max_age_minutes=60))
+
+    def public_key(self, edge_node_id):
+        return self.pem if edge_node_id == EDGE and self.status == "ACTIVE" else None
+
+
+def _edge_item(private, terminal=None, **fields) -> dict:
+    accepted = datetime.now(UTC) - timedelta(minutes=fields.pop("age_minutes", 0))
+    item = {"offline_reference": str(uuid4()), "idempotency_key": str(uuid4()), "amount": 50_000,
+            "currency": "INR", "payment_method": "OFFLINE", "underlying_rail": "CARD",
+            "method_details": {"encrypted_card_data": "x"}, "terminal_id": str(terminal or uuid4()),
+            "merchant_id": str(MERCHANT), "edge_node_id": str(EDGE),
+            "local_timestamp": accepted.isoformat().replace("+00:00", "Z"), **fields}
+    signature = private.sign(canonical_item(item), ec.ECDSA(hashes.SHA256()))
+    return {**item, "signature": base64.b64encode(signature).decode()}
+
+
+def _edge_service(status="ACTIVE"):
+    private, pem = _key()
+    engine = FakeEngine()
+    service = OfflineSyncService(MethodRegistry([OfflineMethodAdapter()]), FakeRepo(None), engine, _verify,
+                                 edges=FakeEdges(pem, status))
+    return service, engine, private
+
+
+def test_an_edge_batch_is_verified_with_the_edges_key_and_limits():
+    service, engine, edge_key = _edge_service()
+    till = uuid4()
+    terminal_key, _ = _key()
+    good = _edge_item(edge_key, till)
+    forged = {**_edge_item(edge_key), "amount": 90_000}  # edited after signing
+    by_terminal = _edge_item(terminal_key)  # a terminal's key is not the edge's
+    other_edge = _edge_item(edge_key, edge_node_id=str(uuid4()))
+    other_merchant = _edge_item(edge_key, merchant_id=str(uuid4()))
+    over_limit = _edge_item(edge_key, amount=100_001)  # the edge's own limit, not the method's
+    stale = _edge_item(edge_key, age_minutes=61)
+
+    results = service.sync_edge(EDGE, [good, forged, by_terminal, other_edge, other_merchant, over_limit, stale])
+
+    assert [r.get("reason") for r in results] == [None, "SIGNATURE_INVALID", "SIGNATURE_INVALID", "EDGE_MISMATCH",
+                                                  "EDGE_MISMATCH", "OFFLINE_LIMIT_EXCEEDED",
+                                                  "OFFLINE_TRANSACTION_EXPIRED"]
+    [created] = engine.created
+    # Submitted as the till that took the sale, on its real rail; the engine checks that till is the merchant's.
+    assert (created["terminal_id"], created["merchant_id"], created["payment_method"]) == (str(till), str(MERCHANT),
+                                                                                          "CARD")
+
+
+def test_a_revoked_or_unknown_edge_is_refused_outright():
+    service, _, edge_key = _edge_service(status="REVOKED")
+    with pytest.raises(RegistrationError):
+        service.sync_edge(EDGE, [_edge_item(edge_key)])
+    service, _, edge_key = _edge_service()
+    with pytest.raises(RegistrationError):
+        service.sync_edge(uuid4(), [_edge_item(edge_key)])

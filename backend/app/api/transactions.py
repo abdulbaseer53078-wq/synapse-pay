@@ -10,6 +10,7 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.application.observability import log_outcome, trace_id_from
 from app.application.registration import InvalidInput, Unauthenticated
 from app.application.transaction_sync import OfflineSyncService
 from app.application.transactions import TransactionService
@@ -43,21 +44,17 @@ class TransactionBody(_Body):
 
 
 @router.post("/sync", status_code=200)
-def sync_offline(body: dict, request: Request,
-                 x_terminal_id: str | None = Header(default=None)) -> JSONResponse:
+def sync_offline(body: dict, request: Request, x_terminal_id: str | None = Header(default=None),
+                 x_edge_node_id: str | None = Header(default=None)) -> JSONResponse:
     """Batch upload of sales a terminal accepted while offline (spec: syncOfflineTransactions).
 
-    The terminal's certificate is the authentication (the gateway verified it); each item's own signature is
-    what proves the amount was not edited in the local queue. Nothing here is trusted before that check.
+    The terminal's or edge node's certificate is the authentication (the gateway verified it, and sets the
+    header that doesn't apply to "-"); each item's own signature is what proves the amount was not edited in the
+    local queue. Nothing here is trusted before that check.
     """
-    caller = None
-    if x_terminal_id is not None:
-        try:
-            caller = UUID(x_terminal_id)
-        except ValueError:
-            caller = None
-    if caller is None:
-        raise Unauthenticated("offline sync requires a terminal's client certificate (mTLS)")
+    caller, edge = _uuid(x_terminal_id), _uuid(x_edge_node_id)
+    if caller is None and edge is None:
+        raise Unauthenticated("offline sync requires a terminal's or edge node's client certificate (mTLS)")
 
     items = body.get("transactions")
     if not isinstance(items, list) or not items:
@@ -66,19 +63,33 @@ def sync_offline(body: dict, request: Request,
         raise InvalidInput(f"a batch may hold at most {MAX_SYNC_ITEMS} transactions; send more, smaller batches")
 
     service: OfflineSyncService = request.app.state.offline_sync
-    return JSONResponse(status_code=200, content={"results": service.sync(caller, items)})
+    results = service.sync(caller, items) if caller is not None else service.sync_edge(edge, items)
+    return JSONResponse(status_code=200, content={"results": results})
+
+
+def _uuid(header: str | None) -> UUID | None:
+    try:
+        return UUID(header) if header is not None else None
+    except ValueError:
+        return None
 
 
 @router.post("", status_code=201)
 def create_transaction(body: TransactionBody, request: Request,
-                       x_terminal_id: str | None = Header(default=None)) -> JSONResponse:
+                       x_terminal_id: str | None = Header(default=None),
+                       x_trace_id: str | None = Header(default=None)) -> JSONResponse:
     service: TransactionService = request.app.state.transactions
     data = body.model_dump(mode="json", exclude_unset=True)
     data.setdefault("capture_mode", "AUTO")
+    # Step 18.2: the SDK's trace id (or a fresh one) follows the payment through the cascade, card-service and
+    # the audit log, and comes back in the response so a merchant can quote it.
+    trace_id = trace_id_from(x_trace_id)
     caller = None
     if x_terminal_id is not None:
         try:
             caller = UUID(x_terminal_id)
         except ValueError:
             caller = None
-    return JSONResponse(status_code=201, content=service.create(caller, data))
+    response = service.create(caller, data, trace_id=trace_id)
+    log_outcome(trace_id, response)
+    return JSONResponse(status_code=201, content=response, headers={"X-Trace-Id": trace_id})
