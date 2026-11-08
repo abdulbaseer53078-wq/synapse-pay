@@ -55,7 +55,7 @@ class FileCertificateAuthority:
         tmp.write_bytes(crl.public_bytes(PEM))
         os.replace(tmp, self._crl_path)  # atomic: readers never see a half-written CRL
 
-    def issue(self, csr_pem: str, terminal_id: UUID) -> IssuedCertificate:
+    def issue(self, csr_pem: str, terminal_id: UUID, uri: str | None = None) -> IssuedCertificate:
         key = validated_csr(csr_pem).public_key()
 
         # The subject and extensions come from the registry, never from the CSR.
@@ -73,7 +73,7 @@ class FileCertificateAuthority:
                                          data_encipherment=False, key_agreement=False, key_cert_sign=False,
                                          crl_sign=False, encipher_only=False, decipher_only=False), critical=True)
             .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
-            .add_extension(x509.SubjectAlternativeName([x509.UniformResourceIdentifier(terminal_uri(terminal_id))]),
+            .add_extension(x509.SubjectAlternativeName([x509.UniformResourceIdentifier(uri or terminal_uri(terminal_id))]),
                            critical=False)
             .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(self._ca_key.public_key()),
                            critical=False)

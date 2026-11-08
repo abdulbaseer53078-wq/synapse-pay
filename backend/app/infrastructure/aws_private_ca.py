@@ -46,7 +46,7 @@ class AwsPrivateCertificateAuthority:
         chain = client.get_certificate_authority_certificate(CertificateAuthorityArn=ca_arn)
         self.ca_certificate_pem = "\n".join(p for p in (chain["Certificate"], chain.get("CertificateChain")) if p)
 
-    def issue(self, csr_pem: str, terminal_id: UUID) -> IssuedCertificate:
+    def issue(self, csr_pem: str, terminal_id: UUID, uri: str | None = None) -> IssuedCertificate:
         key = validated_csr(csr_pem).public_key()
         from botocore.exceptions import BotoCoreError, ClientError
 
@@ -59,7 +59,7 @@ class AwsPrivateCertificateAuthority:
                 Validity={"Value": self._validity_days, "Type": "DAYS"},
                 ApiPassthrough={
                     "Subject": {"CommonName": str(terminal_id)},
-                    "Extensions": {"SubjectAlternativeNames": [{"UniformResourceIdentifier": terminal_uri(terminal_id)}]},
+                    "Extensions": {"SubjectAlternativeNames": [{"UniformResourceIdentifier": uri or terminal_uri(terminal_id)}]},
                 },
                 # A retry of the same request gets the same certificate, but a new CSR is a new certificate.
                 IdempotencyToken=hashlib.sha256(f"{terminal_id}|{csr_pem}".encode()).hexdigest()[:36],

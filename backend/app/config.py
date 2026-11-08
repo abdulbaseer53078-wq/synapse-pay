@@ -63,6 +63,10 @@ class Settings:
     ca_backend: str = "file"
     aws_pca_arn: str = ""
     aws_pca_signing_algorithm: str = "SHA256WITHECDSA"  # must match the CA's key: SHA256WITHRSA for an RSA CA
+    # Step 18: Prometheus metrics on their own port (never the public API port). 0 disables the server.
+    metrics_port: int = 0
+    # Step 20: PEM of the ECDSA P-256 key that signs edge nodes' offline rules. Empty: edge rules unavailable.
+    edge_rules_signing_key: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -102,4 +106,7 @@ class Settings:
             ca_backend=ca_backend,
             aws_pca_arn=os.environ["AWS_PCA_ARN"] if ca_backend == "aws_pca" else "",
             aws_pca_signing_algorithm=os.environ.get("AWS_PCA_SIGNING_ALGORITHM", "SHA256WITHECDSA"),
+            metrics_port=int(os.environ.get("METRICS_PORT", "0")),
+            edge_rules_signing_key=(Path(os.environ["EDGE_RULES_KEY_PATH"]).read_text()
+                                    if os.environ.get("EDGE_RULES_KEY_PATH") else ""),
         )
