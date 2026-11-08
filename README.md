@@ -15,6 +15,7 @@ terminal with no link at all can relay through the terminal next to it.
 ![Java](https://img.shields.io/badge/terminal%20SDK-Java%208-ED8B00)
 ![OpenAPI](https://img.shields.io/badge/contract-OpenAPI%203.1-6BA539)
 ![Postgres](https://img.shields.io/badge/db-PostgreSQL-4169E1)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -184,3 +185,7 @@ Issues and pull requests are welcome. Good places to start:
 
 Conventions: providers stay behind interfaces, every money-moving endpoint is idempotent, and no card number,
 token or personal data ever reaches a log.
+
+## License
+
+[MIT](LICENSE). Use it, change it, build on it; keep the copyright notice.

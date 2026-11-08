@@ -11,3 +11,5 @@ node_modules/
 audit-worm/
 .verify-worm/
 observability/pagerduty_routing_key
+# pytest scratch dirs, when TMP points inside the repo
+pytest-of-*/
