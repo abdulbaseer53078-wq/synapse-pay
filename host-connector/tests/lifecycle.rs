@@ -39,7 +39,7 @@ fn api_request(amount: u64, capture_mode: &str) -> TransactionRequest {
 }
 
 fn card() -> Card {
-    Card { pan: "4111111111111111".into(), expiry: "2808".into() }
+    Card { pan: "4111111111111111".into(), expiry: "2808".into(), icc: None }
 }
 
 // --- certificates ------------------------------------------------------------------------------------------

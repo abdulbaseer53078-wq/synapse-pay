@@ -69,15 +69,15 @@ def health_at(last_heartbeat_at: datetime | None, now: datetime) -> HealthState:
     return HealthState.HEALTHY if now - last_heartbeat_at < HEALTHY_WITHIN else HealthState.DEGRADED
 
 
-def authorization_denial(status: TerminalStatus, health: HealthState, firmware_certified: bool,
+def authorization_denial(status: TerminalStatus, health: HealthState, firmware_denial: str | None,
                          profile: CertificationProfile | None, method: str, amount: int, now: datetime) -> str | None:
     """Why a transaction may not run on this terminal, or None if it may. DEGRADED still authorizes."""
     if status != TerminalStatus.ACTIVE:
         return "TERMINAL_NOT_ACTIVE"
     if health == HealthState.UNREACHABLE:
         return "TERMINAL_UNREACHABLE"
-    if not firmware_certified:
-        return "FIRMWARE_UNCERTIFIED"
+    if firmware_denial:  # FIRMWARE_UNCERTIFIED or CERTIFICATION_EXPIRED, from the certification matrix
+        return firmware_denial
     if profile is None:
         return "METHOD_NOT_CERTIFIED"
     if profile.expires_at <= now:

@@ -25,7 +25,8 @@ class HttpCardProcessor:
             "currency": request.currency, "acquirer_terminal_id": request.acquirer_terminal_id,
             "acquirer_merchant_id": request.acquirer_merchant_id,
             "encrypted_card_data": request.encrypted_card_data, "card_expiry": request.card_expiry,
-            "pin_block": request.pin_block, "host_hint": list(request.host_hint),
+            "pin_block": request.pin_block, "emv_data": request.emv_data, "host_hint": list(request.host_hint),
+            "card_token": request.card_token, "merchant_id": request.merchant_id,
         }
         try:
             headers = {"X-Trace-Id": request.trace_id} if request.trace_id else None
@@ -67,6 +68,33 @@ class HttpCardProcessor:
                                                  "currency": currency, "encrypted_card_data": encrypted_card_data,
                                                  "encrypted_cvv": encrypted_cvv})
         return Authentication(data["three_ds"], data["card_bin"], data["card_last4"])
+
+    def tokenize(self, merchant_id: UUID, encrypted_card_data: str, card_expiry: str, card_network: str,
+                 customer_ref: str | None) -> dict:
+        """Step 29: save a card in card-service's vault. Safe to retry: the same card returns the same token."""
+        try:
+            response = self.client.post("/card/tokens", json={
+                "merchant_id": str(merchant_id), "encrypted_card_data": encrypted_card_data,
+                "card_expiry": card_expiry, "card_network": card_network, "customer_ref": customer_ref})
+        except httpx.TransportError as e:
+            raise CardServiceUnavailable("the card service is unavailable; nothing was saved") from e
+        if response.status_code in (400, 422):
+            raise BadCardData(response.json().get("message", "the card data couldn't be used"))
+        if response.status_code != 201:
+            raise CardServiceUnavailable(f"card service answered HTTP {response.status_code}")
+        return response.json()
+
+    def revoke_token(self, merchant_id: UUID, token: str) -> bool:
+        """False if this merchant has no live token by that name."""
+        try:
+            response = self.client.delete(f"/card/tokens/{token}", params={"merchant_id": str(merchant_id)})
+        except httpx.TransportError as e:
+            raise CardServiceUnavailable("the card service is unavailable") from e
+        if response.status_code == 404:
+            return False
+        if response.status_code != 204:
+            raise CardServiceUnavailable(f"card service answered HTTP {response.status_code}")
+        return True
 
     def checkout_key(self) -> dict:
         try:

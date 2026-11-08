@@ -351,6 +351,14 @@ fn build_request(txn: &Transaction, stan: &str, now: SystemTime, config: &IsoHos
             msg.set(field, value.into_bytes()).map_err(|e| e.to_string())?;
         }
     }
+    // DE 55 (Step 27): the chip data, passed through byte for byte. A dialect without DE 55 can't carry chip
+    // payments, so refusing beats silently dropping the cryptogram the issuer needs.
+    if let Some(icc) = &txn.card.icc {
+        if config.dictionary.spec(55).is_none() {
+            return Err("this host's dialect has no DE 55 for chip data".into());
+        }
+        msg.set(55, icc.clone()).map_err(|e| e.to_string())?;
+    }
     let wire = pack(&msg, &config.dictionary).map_err(|e| format!("can't build {mti}: {e}"))?;
     Ok((mti.into(), transmitted, wire))
 }

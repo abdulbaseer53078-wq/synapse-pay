@@ -91,7 +91,7 @@ class _Repo:
 
 
 class _Auth:
-    def authorize(self, terminal_id, method, amount):
+    def authorize(self, terminal_id, method, amount, card_network=None):
         return SimpleNamespace(reason=None, profile=None)
 
 
@@ -307,7 +307,7 @@ def test_validate_uses_the_declared_model_and_normalises():
     adapter = Modelled()
     assert adapter.validate(VALID) == VALID
     with pytest.raises(InvalidMethodDetails) as raised:
-        adapter.validate({"card_expiry": "12/29"})
+        adapter.validate({"card_expiry": "12/29", "card_network": "VISA"})  # no card: neither data nor token
     assert "method_details.encrypted_card_data" in raised.value.message
 
 

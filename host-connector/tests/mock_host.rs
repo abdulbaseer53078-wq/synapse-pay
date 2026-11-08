@@ -133,7 +133,7 @@ fn auth(amount_minor: u64) -> Transaction {
         currency: "INR".into(),
         merchant_id: "MERCHANT0000001".into(),
         terminal_id: "TERM0001".into(),
-        card: Card { pan: "4111111111111111".into(), expiry: "2812".into() },
+        card: Card { pan: "4111111111111111".into(), expiry: "2812".into(), icc: None },
     }
 }
 

@@ -1,0 +1,60 @@
+# Step 27: the certification test harness on every PR that touches the card payment path. The matrix runs through
+# the real card service and ISO 8583 stack against the strict scheme simulator; a failing case fails the PR.
+# The reports are uploaded as evidence. Recording a run against a real firmware stays a separate, human step.
+name: certification
+
+on:
+  pull_request:
+    paths:
+      - iso8583/**
+      - host-connector/**
+      - card-service/**
+      - certification/**
+      - backend/app/infrastructure/methods/card.py
+      - backend/app/infrastructure/card_service_client.py
+      - .github/workflows/certification.yml
+
+permissions:
+  contents: read
+
+jobs:
+  harness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres  # throwaway CI database
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: card-service
+      - run: pip install -r backend/requirements.txt
+      - name: Scheme simulator checks
+        working-directory: certification
+        run: python -m pytest -q test_scheme_sim.py
+      - name: Certification matrix through the real stack
+        working-directory: backend
+        env:
+          CERT_REPORT_DIR: ${{ runner.temp }}/certification-reports
+        # A skip (no cargo, no openssl) must fail the gate, not pass it quietly. shell: bash adds pipefail.
+        shell: bash
+        run: |
+          python -m pytest -q -rs tests/test_certification_harness.py | tee "$RUNNER_TEMP/pytest.out"
+          ! grep -q "SKIPPED" "$RUNNER_TEMP/pytest.out"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: certification-reports
+          path: ${{ runner.temp }}/certification-reports
+          if-no-files-found: ignore
