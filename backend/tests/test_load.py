@@ -9,10 +9,14 @@ waits; run loadtest/run-k6.sh <LOAD_TEST_OUT> from a shell that can, and the tes
 import functools
 import json
 import os
+import socket
 import subprocess
+import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
+import httpx
 import pytest
 from psycopg_pool import ConnectionPool
 
@@ -20,7 +24,7 @@ import app.main as app_main
 from app.infrastructure.card_service_client import HttpCardProcessor
 from app.main import create_app
 from card_sim import encrypted_card
-from e2e_stack import ROOT, needs_cargo
+from e2e_stack import ROOT, Process, needs_cargo
 from test_chaos_gate import serve
 from test_transactions_e2e import ready  # noqa: F401  (fixture)
 
@@ -28,7 +32,46 @@ K6_IMAGE = "grafana/k6:1.0.0"
 pytestmark = [needs_cargo, pytest.mark.skipif(not os.environ.get("LOAD_TEST"), reason="opt-in: set LOAD_TEST=1")]
 
 
-def test_card_payments_at_100_tps(settings, db, ready, merchant, acquirer, tmp_path, monkeypatch):  # noqa: F811
+@pytest.fixture(scope="session")
+def card_service_binary():
+    """LOAD_RELEASE=1: the card service as it runs in production (a debug build measures the compiler, not us)."""
+    release = bool(os.environ.get("LOAD_RELEASE"))
+    build = subprocess.run(["cargo", "build", "--quiet", "--bin", "card_service", *(["--release"] if release else [])],
+                           cwd=ROOT / "card-service", capture_output=True, text=True, timeout=1800)
+    assert build.returncode == 0, build.stderr
+    return ROOT / "card-service" / os.environ.get("CARGO_TARGET_DIR", "target") / ("release" if release else "debug")         / "card_service"
+
+
+@contextmanager
+def api_processes(settings, ca, card_url, workers, tmp_path):
+    """LOAD_WORKERS=N: the API as deployed, `uvicorn --factory` with N worker processes, from the environment."""
+    jwt = tmp_path / "jwt.pem"
+    jwt.write_text(settings.jwt_public_key)
+    env = {**os.environ, "DATABASE_URL": settings.database_url, "CA_CERT_PATH": str(ca[0]), "CA_KEY_PATH": str(ca[1]),
+           "CA_CRL_PATH": str(ca[2]), "JWT_PUBLIC_KEY_PATH": str(jwt), "CARD_SERVICE_URL": card_url,
+           "WEBHOOK_INTERVAL_SECONDS": "0", "ALLOW_INSECURE_WEBHOOKS": "1"}
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    api = Process([sys.executable, "-m", "uvicorn", "app.main:create_app", "--factory", "--host", "127.0.0.1",
+                   "--port", str(port), "--workers", str(workers), "--log-level", "warning"],
+                  env=env, cwd=ROOT / "backend")
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            if httpx.get(f"http://127.0.0.1:{port}/health/live", timeout=1).status_code == 200:
+                break
+        except httpx.TransportError:
+            time.sleep(0.3)
+    else:
+        raise AssertionError(f"API didn't start:\n{api.output}")
+    try:
+        yield port
+    finally:
+        api.stop()
+
+
+def test_card_payments_at_100_tps(settings, ca, db, ready, merchant, acquirer, tmp_path, monkeypatch):  # noqa: F811
     # ~180,000 sales of ₹100 must not hit the terminal's daily limit: that would be a test artefact, not a bottleneck.
     db.execute("UPDATE certification_profiles SET per_day_limit = 1000000000000, per_transaction_limit = 100000000")
     if os.environ.get("LOAD_DB_POOL"):  # an experiment knob: the API's Postgres pool size, without editing main.py
@@ -40,7 +83,11 @@ def test_card_payments_at_100_tps(settings, db, ready, merchant, acquirer, tmp_p
     for stale in ("summary.json", "k6.env", "k6.exit", "k6.txt"):
         (out / stale).unlink(missing_ok=True)
     try:
-        with serve(create_app(settings, cards=cards)) as (_, port):
+        workers = int(os.environ.get("LOAD_WORKERS", "0"))
+        server = (api_processes(settings, ca, acquirer[0], workers, tmp_path) if workers
+                  else serve(create_app(settings, cards=cards)))
+        with server as started:
+            port = started if workers else started[1]
             k6_env = {"API_URL": f"http://host.docker.internal:{port}", "TERMINAL_ID": ready["terminal_id"],
                       "MERCHANT_ID": str(merchant), "ENVELOPE": encrypted_card(),
                       **{k: os.environ[k] for k in ("RAMP", "RAMP2", "HOLD") if k in os.environ}}  # shorter stages

@@ -12,4 +12,7 @@ COPY --chmod=755 docker/write-secrets.sh /usr/local/bin/write-secrets
 USER app
 EXPOSE 8000
 ENTRYPOINT ["/usr/local/bin/write-secrets"]
+# Worker processes: the API is CPU-bound in Python, so throughput scales with processes, not async (PR 9: 1 worker
+# ~58 req/s, 4 workers ~99 req/s). uvicorn reads this itself; each worker opens its own Postgres pool.
+ENV WEB_CONCURRENCY=4
 CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
