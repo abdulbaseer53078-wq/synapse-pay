@@ -214,19 +214,28 @@ def test_2_dead_primary_acquirer_cascades_to_the_backup(settings, healthy, ready
 def test_2b_primary_approves_then_goes_dark_no_double_charge(settings, healthy, ready, merchant, db):
     """psp_1 receives the purchase and approves it, but its answer, and its reversal, never get back. The outcome
     is unknown, so asking psp_2 could charge the customer twice: the payment must stay PENDING instead."""
-    healthy["proxies"]["psp_1"].swallow()
-    app, install = engine(settings, healthy)
-    with TestClient(app) as client:
-        install()
-        r = client.post("/api/v1/transactions", json=body(ready, merchant, 4200),
-                        headers={"x-terminal-id": ready["terminal_id"]})
+    # psp_1's connections echo together every 30 s, and a swallowed echo holds its connection for 5 s. A purchase
+    # that lands then finds no free connection, is never sent, and safely goes to psp_2 instead. That run is not
+    # this scenario, so it is checked for a single charge and the scenario is tried again with a new amount.
+    for amount in (4200, 4201, 4202):
+        healthy["proxies"]["psp_1"].swallow()
+        app, install = engine(settings, healthy)
+        with TestClient(app) as client:
+            install()
+            r = client.post("/api/v1/transactions", json=body(ready, merchant, amount),
+                            headers={"x-terminal-id": ready["terminal_id"]})
+        assert r.status_code in (200, 201), r.text
+        if charged(healthy, "psp_1", amount) or r.json()["status"] == "PENDING":
+            break
+        assert r.json()["status"] == "CAPTURED" and charged(healthy, "psp_2", amount) == 1, r.text
+        healthy["proxies"]["psp_1"].heal()
+        wait_for(healthy, {"psp_1": "UP", "psp_2": "UP"})
 
-    assert r.status_code in (200, 201), r.text
-    assert r.json()["status"] == "PENDING", r.text
     trail = attempts(db, r.json())
+    assert r.json()["status"] == "PENDING", (r.text, trail)
     assert [(a["asked"], a["status"], a["retryable"]) for a in trail] == [("psp_1", "PENDING", False)]
-    assert charged(healthy, "psp_1", 4200) == 1, "psp_1 really approved it: reconciliation must settle it"
-    assert charged(healthy, "psp_2", 4200) == 0, "psp_2 was asked too: a double charge"
+    assert charged(healthy, "psp_1", amount) == 1, "psp_1 really approved it: reconciliation must settle it"
+    assert charged(healthy, "psp_2", amount) == 0, "psp_2 was asked too: a double charge"
 
 
 def test_3_the_card_service_reports_the_host_that_answered(healthy):
