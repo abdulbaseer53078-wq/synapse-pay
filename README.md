@@ -1,173 +1,186 @@
 # SynapsePay
 
-**A Terminal-to-Cloud payment network that routes every payment method through one unified contract, designed to keep accepting payments when the internet drops.**
+**An open payment network you can read end to end: from the card tap on a terminal, through ISO 8583 to the
+acquirer, to the signed webhook, with every hard problem in between built and tested.**
 
-> **Status:** Stage 1 in progress, sandbox only. Websites take card payments end to end (Synapse card frame → 3-D Secure → ISO 8583 → mock acquirer → signed webhook), and so do terminals via the API. Every state change is now recorded in a hash-chained, WORM-backed audit log (Step 7). Still to come: the terminal app (Step 5B).
+Cards, UPI, wallets, QR and offline payments all go through one API contract. Terminals talk straight to the
+cloud over mutual TLS. When a shop's internet drops, an on-premise edge node keeps it taking payments, and a
+terminal with no link at all can relay through the terminal next to it.
+
+> **Status:** a working sandbox, not a production processor. The HSM, acquirers, PSPs and card schemes are
+> simulated, so you can run the whole network on a laptop and take a test payment in five minutes.
+
+![Python](https://img.shields.io/badge/backend-FastAPI%20%2F%20Python-3776AB)
+![Rust](https://img.shields.io/badge/card%20path-Rust-B7410E)
+![Java](https://img.shields.io/badge/terminal%20SDK-Java%208-ED8B00)
+![OpenAPI](https://img.shields.io/badge/contract-OpenAPI%203.1-6BA539)
+![Postgres](https://img.shields.io/badge/db-PostgreSQL-4169E1)
 
 ---
 
-## What is SynapsePay?
+## Why you might find this interesting
 
-SynapsePay is a payment network built on a **Terminal-to-Cloud (T2C) architecture**. Instead of routing card-present transactions through a traditional gateway intermediary, terminals connect **directly** to a cloud processing host, collapsing `terminal → gateway → host` into `terminal → host`.
+Most payment code is closed source, so the hard parts are rarely explained. Here they're built, tested, and
+written down next to the code:
 
-It is not just a card network. Cards, UPI, wallets, QR and offline payments are pluggable adapters under a **single unified transaction model**. One API contract, many rails.
+| Problem | How it's solved here | Where |
+| :--- | :--- | :--- |
+| **Never charge a card twice** when the network fails mid-payment | Mandatory idempotency keys; a timed-out acquirer is never retried on another one, because it may already have approved | [`card-service/src/fleet.rs`](card-service/src/fleet.rs), [`backend/app/application/routing.py`](backend/app/application/routing.py) |
+| **Speak ISO 8583**, the 1980s binary protocol banks still run on | A dictionary-driven parser and packer with property tests | [`iso8583/`](iso8583/) |
+| **Keep card numbers out of everything** | Cards are encrypted on the terminal or in the browser, and only one Rust process with the (simulated) HSM can decrypt them | [`card-service/src/hsm.rs`](card-service/src/hsm.rs) |
+| **Fail over between acquirers** in the middle of a payment | A cascade engine routes on error categories (soft decline, hard decline, system error) | [`backend/app/application/routing.py`](backend/app/application/routing.py) |
+| **Keep selling with the internet down** | An edge node enforces signed offline rules, signs each sale, queues it in SQLite and syncs it later | [`edge-node/`](edge-node/) |
+| **A terminal with no link at all** | It tunnels its own mutual-TLS session through a neighbouring terminal, which can't read or change it | [`sdks/terminal-transport/`](sdks/terminal-transport/) |
+| **Prove the audit log wasn't edited** | A hash-chained, append-only audit log backed by S3 Object Lock | [`backend/app/audit/`](backend/app/audit/), [`docs/step7.md`](docs/step7.md) |
+| **Survive a whole cloud region going down** | Active-passive across two Indian AWS regions, with a game-day driver | [`docs/step17.md`](docs/step17.md), [`infra/`](infra/) |
+| **See every failover** | One `FAILOVER_TRIGGERED` event across Python, Rust and the SDK, a single trace id end to end, plus Prometheus alerts | [`observability/`](observability/) |
 
-The name is deliberate: a synapse is the junction where signals pass between neurons. SynapsePay is the junction where payment methods, terminals and processing hosts connect, without a toll-collecting intermediary in the middle.
-
-## Why it exists
-
-Merchants already have payment gateways. What they need is a **brain that chooses between the rails they already have**, and a network that keeps working when connectivity does not.
-
-| Problem | SynapsePay's answer |
-| :--- | :--- |
-| Gateway intermediaries add fees, compliance scope and failure points | Terminals connect directly to the processing host |
-| Each payment method needs a separate integration | One unified transaction model; new methods are adapters, not rewrites |
-| Connectivity loss halts card-present acceptance | An on-premise edge node screens and accepts transactions locally, then syncs on reconnection |
-| Merchants are locked into one terminal vendor | A universal terminal adapter across Android POS, Linux POS, SoftPOS and more |
+Every one of these has a test that breaks if the guarantee breaks: chaos tests that cut cables mid-payment, tests
+that edit a queued sale, and tests that replay old signed rules.
 
 ## Architecture
 
-The target design. What exists today is listed under Current status.
+```mermaid
+flowchart TB
+    subgraph Shop["In the shop"]
+        T1["Terminal A<br/>(Android POS)"]
+        T2["Terminal B"]
+        Edge["Edge node<br/>signed offline rules · SQLite queue"]
+    end
 
-```text
-┌──────────────────────────────────────────────────────────┐
-│               MERCHANT APP / POS APP                     │
-│              (SynapsePay Merchant SDK)                   │
-└────────────────────────────┬─────────────────────────────┘
-                             │ HTTPS: OAuth 2.0 (backends) / mTLS (terminals)
-┌────────────────────────────▼─────────────────────────────┐
-│                   SYNAPSEPAY CLOUD                       │
-│                                                          │
-│   API edge         auth, rate limiting, mTLS termination │
-│   Terminal Registry        X.509 identity, certification │
-│   Transaction Engine            ISO 8583 parse / build   │
-│   Payment Methods    CARD · UPI · WALLET · QR · OFFLINE  │
-│   Routing & Cascade Engine         rule-based → ML       │
-│   Host Connector Pool       multi-acquirer, failover     │
-└────────────────────────────┬─────────────────────────────┘
-                             │ ISO 8583 over TLS
-┌────────────────────────────▼─────────────────────────────┐
-│              ACQUIRER / PROCESSING HOST                  │
-└──────────────────────────────────────────────────────────┘
+    subgraph Cloud["SynapsePay cloud"]
+        GW["Envoy gateway<br/>mTLS + certificate checks"]
+        API["API · FastAPI<br/>transactions · routing · cascade · audit"]
+        Card["card-service · Rust<br/>HSM · ISO 8583 · acquirer fleet"]
+        DB[("PostgreSQL")]
+    end
 
-┌─────────────────────────────┐
-│   EDGE NODE (on-premise)    │
-│   • Local rule cache        │
-│   • Local transaction engine│
-│   • Local fraud screening   │
-│   • Offline queue + sync    │
-└─────────────────────────────┘
+    Web["Merchant website<br/>(web SDK card frame)"] -->|HTTPS| API
+    T1 -->|mTLS| GW
+    T1 -.->|no link: relay| T2
+    T2 -->|mTLS| GW
+    T1 -->|internet down| Edge
+    Edge -->|sync when back| GW
+    GW --> API
+    API --> DB
+    API --> Card
+    Card -->|ISO 8583 over TLS| Acq1["Acquirer A"]
+    Card -->|failover| Acq2["Acquirer B"]
+    API -->|signed webhook| Merchant["Merchant server<br/>(Node SDK)"]
 ```
 
-## Current status
+The rule that holds it together: **providers are plugins**. Each rail (card, UPI, wallet, QR, offline) is an
+adapter behind one interface, so adding a payment method means writing an adapter, not changing the engine.
 
-| Component | Status |
-| :--- | :--- |
-| Unified Transaction Model (OpenAPI 3.1) | ✅ Step 1 (spec now v1.4.0, additive only) |
-| Terminal Registry, mTLS gateway (Envoy), heartbeats, authorization | ✅ Step 2 (`backend/`, `gateway/`) |
-| ISO 8583 parser / packer | ✅ Step 3 (`iso8583/`) |
-| Host Connector: mTLS link, pool, echo, audit, reversals | ✅ Step 4 (`host-connector/`) |
-| `POST /api/v1/transactions` (card, terminals) | ✅ Step 5A (`backend/`) |
-| Card service + simulated HSM | ✅ Step 5A (`card-service/`) |
-| Terminal app (Android, simulated card reader) | ⏳ Step 5B |
-| Terminal app on PAX hardware | ⏳ Step 5C |
-| Payment intents, hosted card frame, 3-D Secure (simulated), webhooks, terminal checkout | ✅ Step 6 |
-| Node.js server SDK, web SDK | ✅ Step 6 (`sdks/node`, `sdks/web`) |
-| Android SDK, Flutter plugin | 🟡 Step 6: written; Java core tested, Kotlin/Flutter not compiled yet |
-| Append-only audit log: hash chain, WORM storage, PAN masking, query API | ✅ Step 7 (`backend/app/audit/`, `infra/`; spec 1.4.0) |
-| Payment method adapters (method-agnostic transaction engine) | ✅ Step 8 (`backend/app/application/methods.py`, `backend/app/infrastructure/methods/`) |
-| UPI adapter + mock PSP (collect, status, refund, polling fallback) | ✅ Step 10A (`backend/app/infrastructure/methods/upi.py`, `mock-psp/`) |
-| UPI webhook endpoint (HMAC, replay window, idempotent delivery) | ✅ Step 10B (`backend/app/api/upi_webhooks.py`, `application/upi_webhooks.py`; spec 1.6.0) |
-| QR adapter (parses UPI QR, dispatches to the encoded rail) | ✅ Step 11 (`backend/app/infrastructure/methods/qr.py`) |
-| Wallet adapter, tokenised direct debit (redirect flow pending spec 1.7.0) | 🟡 Step 12 (`backend/app/infrastructure/methods/wallet.py`, `mock-wallet/`) |
+## Try it in 5 minutes
 
-**Try it:** [take a test payment in 5 minutes](docs/quickstart.md).
+You need PostgreSQL (user `postgres`, password `postgres`), Python 3.12+, Rust and Node.js 18+.
 
-How it works: [terminal payments (Step 5)](docs/step5.md), [merchant SDKs (Step 6)](docs/step6.md), [the audit log (Step 7)](docs/step7.md), [payment method adapters (Step 8)](docs/step8.md), [UPI (Step 10A)](docs/step10a.md), [the UPI webhook (Step 10B)](docs/step10b.md), [QR (Step 11)](docs/step11.md), [wallets (Step 12)](docs/step12.md).
+```bash
+# 1. The sandbox: API, card service, simulated bank. It prints a secret key and a webhook secret.
+cd backend
+pip install -r requirements.txt
+python -m app.sandbox
 
-## The contract
-
-Everything lives in [`spec/openapi.yaml`](spec/openapi.yaml).
-
-| Endpoint | Purpose |
-| :--- | :--- |
-| `POST /api/v1/transactions` | Create a transaction for any payment method |
-| `GET /api/v1/capabilities/{payment_method}` | Static capability descriptor for a method; fetch once and cache |
-| Webhook `transactionStatus` | Final status sent to the request's `webhook_url`, signed with `X-Signature` |
-
-### Design principles
-
-1. **Method-agnostic top level, method-specific payload.** `amount`, `currency`, `terminal_id`, `merchant_id` and `status` are the same for every method. Method-specific data lives in `method_details`, whose shape is chosen by `payment_method`.
-2. **Amounts are integers in the smallest currency unit.** ₹499.99 is `49999` paise. The API never accepts a decimal.
-3. **Idempotency is mandatory.** Every transaction carries a client-generated `idempotency_key`. Replaying the key returns the original response without reprocessing. Reusing it with a different body returns `409`.
-4. **Errors are categorised for routing.** Every failure has an `error_category` (`SOFT_DECLINE`, `HARD_DECLINE`, `SYSTEM_ERROR`, `VALIDATION_ERROR`, `AUTHENTICATION_ERROR`) and a `retryable` flag. The cascade engine reads these to decide whether to try another acquirer.
-5. **Capabilities are declared, not assumed.** Each method publishes a descriptor: refunds, partial refunds, chargebacks, recurring, offline, allowed state transitions, and which dispute framework applies.
-6. **Auth is layered by trust boundary.** OAuth 2.0 client credentials for merchant backends, mutual TLS for terminals, HMAC-SHA256 signatures for webhooks.
-
-### Transaction lifecycle
-
-```text
-INITIATED → PENDING → AUTHORIZED → CAPTURED → SETTLED
-               │           │           │          │
-               ▼           ▼           ▼          ▼
-            FAILED      VOIDED   REFUNDED / PARTIALLY_REFUNDED
-                                         (partial refunds can repeat)
+# 2. In a second terminal: an example shop
+cd examples/node-shop
+npm install
+SYNAPSE_SECRET_KEY=sk_test_... SYNAPSE_WEBHOOK_SECRET=whsec_... npm start
 ```
 
-Methods may skip states: UPI goes `PENDING → SETTLED`, OFFLINE goes `AUTHORIZED → SETTLED` on sync. Each capability descriptor lists the exact transitions its method allows.
+Open http://localhost:3000 and pay with `4111 1111 1111 1111` (any future expiry and CVV). Enter OTP `123456`
+when the sandbox bank asks. Full walkthrough and test cards: [`docs/quickstart.md`](docs/quickstart.md).
 
-### Payment methods (v1)
+## One contract for every payment method
 
-Values come from the capability descriptors in the spec.
+Everything is in [`spec/openapi.yaml`](spec/openapi.yaml) (OpenAPI 3.1, v1 frozen, additive changes only).
 
-| Method | Auth | Settlement | Refunds | Dispute framework |
-| :--- | :--- | :--- | :--- | :--- |
-| **CARD** | Issuer authorization | T+1 | Full and partial | Card scheme (Visa / Mastercard / RuPay) |
-| **UPI** | VPA collect | Instant | Full and partial | NPCI UPI |
-| **WALLET** | OTP | T+0 | Full only | None |
-| **QR** | Inherits rail | Inherits rail | Inherits rail | Inherits rail (`qr_encoded_rail`) |
-| **OFFLINE** | Local fraud screening | T+1 on sync | None in v1 | None in v1 |
+```json
+POST /api/v1/transactions
+{
+  "idempotency_key": "6f1c…",
+  "amount": 49999,
+  "currency": "INR",
+  "payment_method": "UPI",
+  "method_details": { "vpa": "asha@okhdfcbank", "flow_type": "COLLECT" },
+  "terminal_id": "…",
+  "merchant_id": "…"
+}
+```
 
-A QR payment is recorded as `QR`, but its rules come from the rail it encodes (UPI, card scheme or wallet). The QR descriptor itself applies only when the rail is `UNKNOWN`.
+- **Same top level, method-specific `method_details`.** Swap `"UPI"` for `"CARD"` and send card details instead.
+- **Integer amounts in the smallest unit.** ₹499.99 is `49999`. Never a float.
+- **Idempotency is mandatory.** Replaying a key returns the original answer; reusing it with a different body is `409`.
+- **Errors are built for routing.** Every error has an `error_category` and a `retryable` flag, and the cascade
+  engine decides from those whether to try another acquirer.
+- **Capabilities are declared.** `GET /api/v1/capabilities/{method}` says what a rail supports: refunds,
+  chargebacks, settlement time and its allowed state transitions.
 
-### Versioning
+| Method | Authorization | Settlement | Disputes |
+| :--- | :--- | :--- | :--- |
+| CARD | Issuer, over ISO 8583 | T+1 | Card scheme |
+| UPI | VPA collect | Instant | NPCI |
+| WALLET | OTP | T+0 | None |
+| QR | Same as the rail it encodes | Same | Same |
+| OFFLINE | Local rules on the edge node | On sync | None in v1 |
 
-v1.0.0 is frozen. Any breaking change to the contract goes through a versioned process (for example a `/v2` endpoint).
-
-## Repository structure
+## What's in the repo
 
 ```text
 synapse-pay/
-├── spec/             # The Unified Transaction Model (OpenAPI) and its contract tests
-├── backend/          # FastAPI: terminal registry, transactions API (Python)
-├── gateway/          # Envoy config: terminal mTLS, registry check before the backend
-├── iso8583/          # ISO 8583 message library (Rust)
-├── host-connector/   # Acquirer connection: mTLS, pool, echo, audit, reversals (Rust) + mock acquirer
-├── card-service/     # Simulated HSM + card flow; the only process that sees a card number (Rust)
-├── sdks/             # Merchant SDKs: node (server), web, android, flutter
-├── examples/         # A complete example shop
-├── infra/            # S3 Object Lock bucket for the audit WORM store (Terraform)
-├── db/migrations/    # PostgreSQL schema
-└── docs/             # How each step works and how to run it
+├── spec/                # The API contract (OpenAPI) and its contract tests
+├── backend/             # FastAPI: transactions, routing and cascade, terminal registry, audit log (Python)
+├── card-service/        # Simulated HSM, card flow and acquirer fleet: the only process that sees a card number (Rust)
+├── iso8583/             # ISO 8583 parser and packer (Rust)
+├── host-connector/      # Acquirer links: mTLS, connection pool, echo, reversals, mock acquirer (Rust)
+├── gateway/             # Envoy: terminal mTLS and certificate checks before the backend
+├── edge-node/           # On-premise offline engine and sync worker (Python, SQLite)
+├── sdks/
+│   ├── node/            # Merchant server SDK (TypeScript)
+│   ├── web/             # Browser card frame SDK (TypeScript)
+│   ├── terminal-transport/  # Multi-path networking and the terminal mesh (Java 8, no dependencies)
+│   ├── android/  flutter/   # Mobile SDKs
+├── examples/node-shop/  # A complete shop in one file
+├── observability/       # Prometheus alerts (with promtool tests) and a Grafana failover dashboard
+├── infra/               # Terraform: two-region ECS, Route 53 failover, audit WORM bucket
+├── db/migrations/       # PostgreSQL schema
+└── docs/                # How each part works and why it was built that way
 ```
 
-## Running the contract tests
-
-Prerequisites: **Node.js 18+**, **Python 3.10+**, and a bash shell with `curl` (on Windows, Git Bash).
+## Running the tests
 
 ```bash
-pip install -r spec/requirements.txt
-bash spec/contract-test.sh
+cd backend && pytest                      # API, routing, audit, edge sync (needs PostgreSQL)
+cd card-service && cargo test             # HSM, card flow, failover
+cd iso8583 && cargo test
+cd sdks/terminal-transport && ./run-tests.sh   # cable-pull chaos tests and the mesh
+cd edge-node && pytest
+bash spec/contract-test.sh                # the contract against a mock server
 ```
 
-The script:
+## Where it's going
 
-1. Validates all examples in `openapi.yaml` and checks the contract's rules (required fields, enums, method-specific payloads, error format).
-2. Starts a Prism mock server from the spec (a pinned version, via `npx`).
-3. Runs Schemathesis-generated requests against the mock and checks every response against the spec.
+| Area | Status |
+| :--- | :--- |
+| Unified contract, terminal registry, mTLS gateway | ✅ |
+| ISO 8583, acquirer connector, card service | ✅ |
+| Payment intents, web and Node SDKs, signed webhooks | ✅ |
+| Hash-chained audit log | ✅ |
+| Card, UPI, QR and wallet adapters | ✅ (wallet redirect flow pending) |
+| Multi-acquirer routing and cascade, chaos-tested | ✅ |
+| Terminal multi-path networking, region failover, observability | ✅ |
+| Edge node: signed rules, offline engine, sync | ✅ |
+| Terminal mesh relay | ✅ (BLE and Wi-Fi Direct adapters need real devices) |
+| Certification registry, token vault, local fraud screening | 🚧 in progress |
+| Terminal app on real POS hardware | ⏳ |
 
-To lint the spec:
+## Contributing
 
-```bash
-npx @redocly/cli@1.34.0 lint spec/openapi.yaml
-```
+Issues and pull requests are welcome. Good places to start:
+
+- Read a design doc in [`docs/`](docs/) and the code beside it. Each step explains its trade-offs.
+- Run the sandbox and try to break it. Bug reports with a failing test are the most useful kind.
+- The open items in the table above are real work waiting for someone.
+
+Conventions: providers stay behind interfaces, every money-moving endpoint is idempotent, and no card number,
+token or personal data ever reaches a log.
