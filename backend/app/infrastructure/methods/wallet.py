@@ -30,7 +30,7 @@ WALLET_CAPABILITIES = CapabilityDescriptor(
     supports_chargeback=False,  # a wallet dispute is a provider support ticket, not a card chargeback
     supports_recurring=False,  # auto-debit exists, but not in this adapter yet
     supports_offline=False,
-    supports_refund=True,
+    supports_refund=False,  # PR 4: the wallet adapter has no refund call yet
     supports_partial_refund=False,  # the contract's WalletCapabilities: full refunds only
     supports_partial_capture=False,
     settlement_timeline="T+0",  # the contract says T+0; the brief said T+1
@@ -43,8 +43,7 @@ WALLET_CAPABILITIES = CapabilityDescriptor(
         Transition("PENDING", "FAILED"),
         Transition("AUTHORIZED", "CAPTURED"),
         Transition("CAPTURED", "SETTLED"),
-        Transition("CAPTURED", "REFUNDED"),
-        Transition("SETTLED", "REFUNDED"),
+        # Refund transitions return with the wallet refund call (PR 4 follow-up).
     ),
 )
 

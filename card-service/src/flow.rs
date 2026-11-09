@@ -11,6 +11,7 @@ use host_connector::{Card, Decision, HostConnector, HostError, RequestContext, T
 use serde::{Deserialize, Serialize};
 
 use crate::hsm::{ClearPan, Hsm, HsmError};
+use crate::reversals::ReversalQueue;
 use crate::vault::{Vault, VaultError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -156,6 +157,8 @@ pub struct CardFlow {
     pub timeouts: Timeouts,
     /// Saved cards (Step 29); None when no vault is configured, so token payments are refused.
     pub vault: Option<Arc<Vault>>,
+    /// Owed reversals that outlive this request (PR 3); None without a database, so they are only logged.
+    pub reversals: Option<Arc<ReversalQueue>>,
 }
 
 /// MM/YY → YYMM (DE 14).
@@ -246,6 +249,15 @@ impl CardFlow {
         let mut reversal = Reversal::NotNeeded;
         if outcome.status == Status::Pending {
             reversal = self.reverse(&txn, &trace).await;
+            if reversal == Reversal::Failed {
+                // Still owed: queue it before the card number is wiped below, or nothing will ever send it.
+                match &self.reversals {
+                    Some(queue) => if let Err(e) = queue.enqueue(&txn).await {
+                        eprintln!("REVERSAL NOT QUEUED for {}: {e}", txn.transaction_id);
+                    },
+                    None => eprintln!("REVERSAL OWED for {}: no reversal queue configured", txn.transaction_id),
+                }
+            }
             if reversal == Reversal::Reversed {
                 outcome = Outcome {
                     status: Status::Failed,

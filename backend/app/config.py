@@ -12,6 +12,11 @@ DEFAULT_APPROVED_MODELS = {
 }
 
 
+def fee_bps_from_env() -> dict[str, int]:
+    """FEE_BPS, e.g. {"CARD": 200}: Synapse's fee per payment method in basis points (PR 1). Unset means no fee."""
+    return {method: int(bps) for method, bps in (json.loads(os.environ.get("FEE_BPS", "null")) or {}).items()}
+
+
 @dataclass(frozen=True)
 class Settings:
     database_url: str
@@ -56,6 +61,9 @@ class Settings:
     aws_pca_signing_algorithm: str = "SHA256WITHECDSA"  # must match the CA's key: SHA256WITHRSA for an RSA CA
     # Step 18: Prometheus metrics on their own port (never the public API port). 0 disables the server.
     metrics_port: int = 0
+    chargeback_webhook_secret: str = ""  # PR 8: the acquirer's HMAC key for dispute notices; unset refuses them
+    alert_webhook_url: str = ""  # PagerDuty-style events: broken edge chains, reconciliation breaks
+    fee_bps: dict[str, int] = field(default_factory=dict)  # PR 1: Synapse's fee per payment method; none set: no fee
     # Step 20: PEM of the ECDSA P-256 key that signs edge nodes' offline rules. Empty: edge rules unavailable.
     edge_rules_signing_key: str = ""
 
@@ -96,6 +104,9 @@ class Settings:
             aws_pca_arn=os.environ["AWS_PCA_ARN"] if ca_backend == "aws_pca" else "",
             aws_pca_signing_algorithm=os.environ.get("AWS_PCA_SIGNING_ALGORITHM", "SHA256WITHECDSA"),
             metrics_port=int(os.environ.get("METRICS_PORT", "0")),
+            fee_bps=fee_bps_from_env(),
+            alert_webhook_url=os.environ.get("AUDIT_ALERT_WEBHOOK_URL", ""),
+            chargeback_webhook_secret=os.environ.get("CHARGEBACK_WEBHOOK_SECRET", ""),
             edge_rules_signing_key=(Path(os.environ["EDGE_RULES_KEY_PATH"]).read_text()
                                     if os.environ.get("EDGE_RULES_KEY_PATH") else ""),
         )

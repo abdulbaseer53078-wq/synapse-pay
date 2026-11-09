@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.12.0
+  version: 1.15.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
-    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token.
+    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook.
 servers:
   - url: /api
 # Merchant backends use OAuth2; terminals use mTLS. Either satisfies a request.
@@ -12,6 +12,33 @@ security:
   - OAuth2ClientCredentials: [transactions:write]
   - MutualTLS: []
 webhooks:
+  chargebackStatus:
+    post:
+      operationId: chargebackStatusWebhook
+      summary: A chargeback opened, won or lost on one of the merchant's payments (since 1.15.0)
+      description: >-
+        Sent to the payment's webhook_url, signed exactly like transactionStatus (X-Signature over the raw body).
+        `event` tells it apart from a transactionStatus body: chargeback.opened (submit evidence before
+        evidence_deadline), chargeback.won or chargeback.lost. The same event can arrive more than once.
+      security: []
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - type: object
+                  required: [event]
+                  properties:
+                    event: { type: string, enum: [chargeback.opened, chargeback.won, chargeback.lost] }
+                - $ref: '#/components/schemas/Chargeback'
+      responses:
+        '200': { description: Received. }
   transactionStatus:
     post:
       operationId: transactionStatusWebhook
@@ -426,8 +453,9 @@ paths:
     post:
       operationId: createCardToken
       summary: Save a card for later payments (merchant server)
+      deprecated: true
       description: >-
-        Since 1.12.0. The card arrives encrypted to the checkout key (sp2), as from the card form, and is stored
+        Deprecated in 1.13.1: storing card data is frozen pending a PCI DSS review of the card-data architecture (docs/card-data-flow.md); deployments refuse it outside the sandbox, and it may be removed. Since 1.12.0. The card arrives encrypted to the checkout key (sp2), as from the card form, and is stored
         only in the PCI vault: the answer is a token and the masked card. Saving the same card again returns the
         same token, so a retry is safe. Pay with it by sending card_token in CardDetails.
       security:
@@ -458,7 +486,9 @@ paths:
     delete:
       operationId: deleteCardToken
       summary: Forget a saved card (merchant server)
-      description: Since 1.12.0. Takes effect on the next payment, and edge nodes drop it at their next sync.
+      deprecated: true
+      description: >-
+        Deprecated in 1.13.1: storing card data is frozen pending a PCI DSS review of the card-data architecture (docs/card-data-flow.md); deployments refuse it outside the sandbox, and it may be removed. Since 1.12.0. Takes effect on the next payment, and edge nodes drop it at their next sync.
       security:
         - SecretKey: []
       parameters:
@@ -467,6 +497,270 @@ paths:
         '204': { description: Deleted. }
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+  /v1/transactions/{transaction_id}/refund:
+    post:
+      operationId: refundTransaction
+      summary: Refund all or part of a payment (merchant server)
+      description: >-
+        Since 1.13.0. Needs an Idempotency-Key header: the same key returns the same refund (200) whatever state it
+        reached, so a double-clicked refund refunds once; the same key with a different body is a 409. The refund
+        is reserved before the network is asked, so refunds in flight count against what is left. status PENDING
+        means the network hasn't answered; it is re-sent under the same refund id until it does. The payment moves
+        to PARTIALLY_REFUNDED or REFUNDED when the refund completes. Only rails whose capability descriptor has
+        supports_refund (and supports_partial_refund for less than the full amount) can be refunded.
+      security:
+        - SecretKey: []
+      parameters:
+        - { name: transaction_id, in: path, required: true, schema: { type: string, pattern: '^txn_[0-9a-f]{32}$' } }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [amount]
+              properties:
+                amount: { type: integer, minimum: 1, description: 'Minor units; at most what is left of the payment.' }
+                reason: { type: string, maxLength: 255 }
+      responses:
+        '201':
+          description: Refund created (COMPLETED, PENDING or FAILED).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Refund' }
+        '200':
+          description: The refund this Idempotency-Key already made.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Refund' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /v1/transactions/{transaction_id}/capture:
+    post:
+      operationId: captureTransaction
+      summary: Capture an authorized payment in full (merchant server)
+      description: >-
+        Since 1.13.0. AUTHORIZED to CAPTURED for the whole authorized amount; capturing twice returns the same
+        result. 422 OPERATION_NOT_SUPPORTED for a rail that can't capture yet (CARD until its network messages exist).
+      security:
+        - SecretKey: []
+      parameters:
+        - { name: transaction_id, in: path, required: true, schema: { type: string, pattern: '^txn_[0-9a-f]{32}$' } }
+      responses:
+        '200':
+          description: The captured transaction.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /v1/transactions/{transaction_id}/void:
+    post:
+      operationId: voidTransaction
+      summary: Release an authorization that was never captured (merchant server)
+      description: >-
+        Since 1.13.0. AUTHORIZED to VOIDED. No money moved, so nothing is refunded; voiding twice returns the same
+        result.
+      security:
+        - SecretKey: []
+      parameters:
+        - { name: transaction_id, in: path, required: true, schema: { type: string, pattern: '^txn_[0-9a-f]{32}$' } }
+      responses:
+        '200':
+          description: The voided transaction.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TransactionResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /v1/reconciliation/runs:
+    get:
+      operationId: listReconciliationRuns
+      summary: Settlement reconciliation runs, newest first (operations)
+      description: >-
+        Since 1.14.0. Runs are made by the nightly job, one per settlement file plus one close-of-day per rail;
+        nothing here writes.
+      security: [{ OAuth2ClientCredentials: [registry:admin] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        '200':
+          description: The runs.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs]
+                properties:
+                  runs: { type: array, items: { $ref: '#/components/schemas/ReconciliationRun' } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /v1/reconciliation/runs/{run_id}:
+    get:
+      operationId: getReconciliationRun
+      summary: One run and every item it found (operations)
+      security: [{ OAuth2ClientCredentials: [registry:admin] }]
+      parameters:
+        - { name: run_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The run with its items.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ReconciliationRun'
+                  - type: object
+                    required: [items]
+                    properties:
+                      items: { type: array, items: { $ref: '#/components/schemas/ReconciliationItem' } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/reconciliation/runs/{run_id}/report.csv:
+    get:
+      operationId: getReconciliationReport
+      summary: The run as CSV, one line per item (operations)
+      security: [{ OAuth2ClientCredentials: [registry:admin] }]
+      parameters:
+        - { name: run_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The report.
+          content:
+            text/plain:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/chargebacks/{chargeback_id}:
+    get:
+      operationId: getChargeback
+      summary: One of the merchant's chargebacks (merchant server)
+      description: Since 1.15.0. Another merchant's chargeback answers 404, like an unknown one.
+      security:
+        - SecretKey: []
+      parameters:
+        - { name: chargeback_id, in: path, required: true, schema: { type: string, pattern: '^cb_[0-9a-f]{32}$' } }
+      responses:
+        '200':
+          description: The chargeback.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chargeback' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /v1/chargebacks/{chargeback_id}/evidence:
+    post:
+      operationId: submitChargebackEvidence
+      summary: Defend a chargeback, once, before its evidence deadline (merchant server)
+      description: >-
+        Since 1.15.0. Structured text only (documents are planned). PENDING to UNDER_REVIEW; a second submission or one
+        after the deadline is a 409. The outcome arrives as a chargebackStatus webhook.
+      security:
+        - SecretKey: []
+      parameters:
+        - { name: chargeback_id, in: path, required: true, schema: { type: string, pattern: '^cb_[0-9a-f]{32}$' } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [explanation]
+              properties:
+                explanation: { type: string, maxLength: 2000 }
+                receipt_number: { type: string, maxLength: 64 }
+                tracking_number: { type: string, maxLength: 64 }
+                carrier: { type: string, maxLength: 64 }
+                delivery_date: { type: string, format: date }
+                customer_communication: { type: string, maxLength: 2000 }
+      responses:
+        '200':
+          description: The chargeback, now UNDER_REVIEW.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Chargeback' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /v1/webhooks/chargebacks:
+    post:
+      operationId: chargebackOpenedNotice
+      summary: The acquirer reports a chargeback (acquirer to Synapse Pay)
+      description: >-
+        Since 1.15.0. Signed with the acquirer's secret: X-Signature is HMAC-SHA256 over "<X-Timestamp>.<raw body>",
+        and X-Timestamp must be within 5 minutes. Recorded even when it doesn't add up (an unknown payment, a
+        chargeback on top of a refund), and raised to an operator: a chargeback is the network's decision, not a
+        request. Applied once per event_id and once per case_id; answered 200 once trusted.
+      security: []
+      parameters:
+        - { name: X-Timestamp, in: header, required: true, schema: { type: string } }
+        - { name: X-Signature, in: header, required: true, schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [event_id, acquirer_id, case_id, network_reference, amount, currency, reason_code,
+                         evidence_deadline]
+              properties:
+                event_id: { type: string, maxLength: 128 }
+                acquirer_id: { type: string, maxLength: 64 }
+                case_id: { type: string, maxLength: 64 }
+                network_reference: { type: string, maxLength: 64, description: "The payment's RRN." }
+                amount: { type: integer, minimum: 1 }
+                currency: { type: string, pattern: '^[A-Z]{3}$' }
+                reason_code: { type: string, maxLength: 10 }
+                evidence_deadline: { type: string, format: date-time }
+      responses:
+        '200': { description: Received (including a duplicate or a payment we don't know). }
+        '400': { description: 'Not a valid notice, or a stale timestamp.' }
+        '401': { description: Missing or wrong signature. }
+        '503': { description: No acquirer secret is configured; unsigned notices are never accepted. }
+  /v1/webhooks/chargebacks/resolution:
+    post:
+      operationId: chargebackResolutionNotice
+      summary: The acquirer reports a chargeback's outcome (acquirer to Synapse Pay)
+      description: Since 1.15.0. Signed and deduplicated like chargebackOpenedNotice.
+      security: []
+      parameters:
+        - { name: X-Timestamp, in: header, required: true, schema: { type: string } }
+        - { name: X-Signature, in: header, required: true, schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [event_id, acquirer_id, case_id, outcome]
+              properties:
+                event_id: { type: string, maxLength: 128 }
+                acquirer_id: { type: string, maxLength: 64 }
+                case_id: { type: string, maxLength: 64 }
+                outcome: { type: string, enum: [WON, LOST] }
+      responses:
+        '200': { description: Received. }
+        '400': { description: 'Not a valid notice, or a stale timestamp.' }
+        '401': { description: Missing or wrong signature. }
+        '503': { description: No acquirer secret is configured. }
   /v1/terminals:
     get:
       operationId: listTerminals
@@ -860,6 +1154,14 @@ paths:
         and is checked against the edge node's own signed offline limits; `terminal_id` names the till that took
         the sale and must belong to the edge node's merchant. Per-item reason `EDGE_MISMATCH`: the item names
         another edge node or merchant.
+
+        **Chain and rolling limit (1.14.0).** An edge's items carry `edge_seq` and `prev_hash`, both signed. The
+        cloud remembers every item it accepted: a resent item must be identical, and the next one must continue
+        the chain. A gap, a fork, or an unchained item from an edge that chains is answered 403, the edge is put
+        on hold for an operator, and nothing from that batch is processed. The cloud also re-checks the edge's
+        per-terminal offline limit over a rolling 24 hours by the sale's local_timestamp (per-item reason
+        `OFFLINE_DAILY_LIMIT_EXCEEDED`). Offline payment is store-and-forward: a sale the issuer declines at sync
+        is the merchant's loss, and the edge alerts the merchant when it happens.
       security:
         - MutualTLS: []
         - OAuth2ClientCredentials: [transactions:write]
@@ -907,6 +1209,17 @@ paths:
                           from method_details: inference is how per-method branching creeps back into the engine,
                           and a misread shape would dispatch a card sale to UPI.
                       method_details: { $ref: '#/components/schemas/TransactionRequest/properties/method_details' }
+                      edge_seq:
+                        type: integer
+                        minimum: 1
+                        description: >-
+                          Since 1.14.0. The edge's sequence number for this item: 1, 2, 3... per edge node, never
+                          reused, including for items the cloud later declines.
+                      prev_hash:
+                        type: string
+                        description: >-
+                          Since 1.14.0. Lowercase hex SHA-256 of the previous item exactly as sent (signature
+                          included, keys sorted, compact JSON, UTF-8); empty for edge_seq 1.
                       edge_node_id:
                         type: string
                         format: uuid
@@ -1423,9 +1736,9 @@ components:
         supports_chargeback: true
         supports_recurring: true
         supports_offline: true
-        supports_refund: true
-        supports_partial_refund: true
-        supports_partial_capture: true
+        supports_refund: false
+        supports_partial_refund: false
+        supports_partial_capture: false
         settlement_timeline: T+1
         auth_type: issuer_authorization
         is_synchronous: true
@@ -1437,12 +1750,6 @@ components:
           - { from: AUTHORIZED, to: CAPTURED }
           - { from: AUTHORIZED, to: VOIDED }
           - { from: CAPTURED, to: SETTLED }
-          - { from: CAPTURED, to: REFUNDED }
-          - { from: CAPTURED, to: PARTIALLY_REFUNDED }
-          - { from: SETTLED, to: REFUNDED }
-          - { from: SETTLED, to: PARTIALLY_REFUNDED }
-          - { from: PARTIALLY_REFUNDED, to: PARTIALLY_REFUNDED }
-          - { from: PARTIALLY_REFUNDED, to: REFUNDED }
     UpiCapabilities:
       description: >-
         The dispute_rules day counts are illustrative placeholders; confirm them against
@@ -1473,7 +1780,7 @@ components:
         supports_chargeback: false
         supports_recurring: false
         supports_offline: false
-        supports_refund: true
+        supports_refund: false
         supports_partial_refund: false
         supports_partial_capture: false
         settlement_timeline: T+0
@@ -1486,8 +1793,6 @@ components:
           - { from: PENDING, to: FAILED }
           - { from: AUTHORIZED, to: CAPTURED }
           - { from: CAPTURED, to: SETTLED }
-          - { from: CAPTURED, to: REFUNDED }
-          - { from: SETTLED, to: REFUNDED }
     QrCapabilities:
       description: >-
         Fallback used only when qr_encoded_rail is UNKNOWN. QR transactions on a known
@@ -1646,6 +1951,76 @@ components:
         status: { type: string, enum: [ACTIVE, SUSPENDED] }
         valid_from: { type: string, format: date-time }
         valid_until: { type: string, format: date-time }
+    Chargeback:
+      type: object
+      required: [chargeback_id, amount, currency, reason_code, status, evidence_deadline, created_at]
+      properties:
+        chargeback_id: { type: string, pattern: '^cb_[0-9a-f]{32}$' }
+        transaction_id: { type: string, pattern: '^txn_[0-9a-f]{32}$' }
+        amount: { type: integer, minimum: 1 }
+        currency: { type: string }
+        reason_code: { type: string, description: "The card network's reason code." }
+        status:
+          type: string
+          enum: [PENDING, UNDER_REVIEW, WON, LOST]
+          description: >-
+            PENDING: the amount is withheld from the merchant and evidence is due. UNDER_REVIEW: evidence submitted.
+            WON: the merchant is owed it again. LOST: it went back to the cardholder; the fee isn't returned.
+        evidence_deadline: { type: string, format: date-time }
+        evidence: { type: object }
+        created_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+    ReconciliationRun:
+      type: object
+      required: [run_id, kind, rail, business_date, summary, created_at]
+      properties:
+        run_id: { type: string, format: uuid }
+        kind: { type: string, enum: [FILE, CLOSE_DAY] }
+        rail: { type: string, enum: [CARD, UPI, WALLET] }
+        business_date: { type: string, format: date }
+        file_id: { type: [string, 'null'], format: uuid }
+        bank_credited: { type: [integer, 'null'], description: 'What reached the bank for this file, minor units.' }
+        summary:
+          type: object
+          description: >-
+            Counts per outcome, and for a file the gross, fee and net totals; with bank_credited, the liquidity gap
+            (net minus what the bank received).
+        created_at: { type: string, format: date-time }
+    ReconciliationItem:
+      type: object
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          enum: [MATCHED, FEE_ADJUSTED, AMOUNT_MISMATCH, MISSING_IN_LEDGER, MISSING_IN_SETTLEMENT,
+                 DUPLICATE_IN_SETTLEMENT, UNSUPPORTED_ROW]
+          description: >-
+            MATCHED and FEE_ADJUSTED are posted to the ledger (the fee as interchange expense) and move a CAPTURED
+            payment to SETTLED. The others are alerted and need an operator.
+        transaction_id: { type: string, format: uuid }
+        method_reference: { type: string }
+        expected_amount: { type: integer }
+        gross_amount: { type: integer }
+        fee_amount: { type: integer }
+        net_amount: { type: integer }
+        detail: { type: string }
+    Refund:
+      type: object
+      additionalProperties: false
+      required: [refund_id, transaction_id, amount, status, created_at, updated_at]
+      properties:
+        refund_id: { type: string, pattern: '^rfnd_[0-9a-f]{32}$' }
+        transaction_id: { type: string, pattern: '^txn_[0-9a-f]{32}$' }
+        amount: { type: integer, minimum: 1 }
+        status:
+          type: string
+          enum: [PENDING, COMPLETED, FAILED]
+          description: PENDING until the network answers; FAILED releases the amount for another refund.
+        reason: { type: string }
+        network_reference: { type: string }
+        error: { $ref: '#/components/schemas/Error' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     CardToken:
       type: object
       additionalProperties: false
@@ -1928,6 +2303,19 @@ components:
             - AUTHENTICATION_FAILED
             - PAYMENT_INTENT_NOT_FOUND
             - CARD_TOKEN_NOT_FOUND
+            - TRANSACTION_NOT_FOUND
+            - TRANSACTION_NOT_REFUNDABLE
+            - TRANSACTION_NOT_CAPTURABLE
+            - TRANSACTION_NOT_VOIDABLE
+            - REFUND_EXCEEDS_AMOUNT
+            - OPERATION_NOT_SUPPORTED
+            - OUTCOME_UNKNOWN
+            - NETWORK_REFUSED
+            - RECONCILIATION_RUN_NOT_FOUND
+            - CHARGEBACK_NOT_FOUND
+            - CHARGEBACK_NOT_DISPUTABLE
+            - CHARGEBACK_EVIDENCE_LATE
+            - TRANSACTION_IN_DISPUTE
           description: >-
             Machine-readable code. ISSUER_DECLINED (since 1.1.0) covers issuer declines without a more
             specific code; error_category says whether it's soft or hard. Values are added over time, so
@@ -2222,8 +2610,9 @@ components:
         card_token:
           type: string
           pattern: '^tok_[0-9a-f]{32}$'
+          deprecated: true
           description: >-
-            Since 1.12.0. A card this merchant saved with createCardToken. Only the merchant that saved it can pay
+            Deprecated in 1.13.1: storing card data is frozen pending a PCI DSS review of the card-data architecture (docs/card-data-flow.md); deployments refuse it outside the sandbox, and it may be removed. Since 1.12.0. A card this merchant saved with createCardToken. Only the merchant that saved it can pay
             with it.
         encrypted_card_data:
           type: string

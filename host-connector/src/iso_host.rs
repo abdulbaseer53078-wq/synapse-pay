@@ -14,8 +14,8 @@
 //! Reversals (0400) quote the original request in DE 90 (original MTI, STAN and DE 7). The connector remembers
 //! the most recent originals it sent (see [`Originals`]), shared by all of a host's connections.
 //!
-//! shortcut: originals live in memory only; a restart between a timeout and its reversal loses them. Persist
-//! them (or the reversal queue) when reversals move to a background job.
+//! Originals live in memory; [`IsoHostConnector::original`] hands one out so a durable reversal queue can save it,
+//! and [`IsoHostConnector::restore_original`] puts it back after a restart, before the reversal is resent.
 
 use std::collections::{HashMap, VecDeque};
 use crate::stan::StanSource;
@@ -62,10 +62,10 @@ type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<u8>>>>>;
 
 /// What a reversal needs to quote about the request it undoes (DE 90).
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Original {
-    mti: String,
-    stan: String,
-    transmitted: String, // DE 7, MMDDhhmmss
+pub struct Original {
+    pub mti: String,
+    pub stan: String,
+    pub transmitted: String, // DE 7, MMDDhhmmss
 }
 
 /// The most recent requests sent to one host, by transaction_id, so a reversal can find its original.
@@ -120,6 +120,16 @@ pub struct IsoHostConnector {
 }
 
 impl IsoHostConnector {
+    /// What a reversal of `transaction_id` would quote (DE 90), if this host's connections sent it recently.
+    pub fn original(&self, transaction_id: &str) -> Option<Original> {
+        self.originals.lock().unwrap().get(transaction_id)
+    }
+
+    /// Puts back an original saved before a restart, so its reversal can be sent.
+    pub fn restore_original(&self, transaction_id: &str, original: Original) {
+        self.originals.lock().unwrap().remember(transaction_id, original);
+    }
+
     /// Takes over the link's event stream. Must be called inside a Tokio runtime.
     pub fn new(link: Link, events: mpsc::Receiver<LinkEvent>, config: impl Into<Arc<IsoHostConfig>>) -> Self {
         Self::with_stans(link, events, config.into(), Arc::new(StanSource::single()), Originals::default())

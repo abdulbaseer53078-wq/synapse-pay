@@ -7,7 +7,14 @@ uvicorn==0.54.0
 confluent-kafka==2.16.1
 tzdata==2026.6  # time zone data for zoneinfo on Windows
 prometheus-client==0.23.1  # Step 18 metrics
+# PR 10: request, SQL and outbound-HTTP spans, exported over OTLP/HTTP when OTEL_EXPORTER_OTLP_ENDPOINT is set
+opentelemetry-sdk==1.45.2
+opentelemetry-exporter-otlp-proto-http==1.45.2
+opentelemetry-instrumentation-fastapi==0.66b2
+opentelemetry-instrumentation-psycopg==0.66b2
+opentelemetry-instrumentation-httpx==0.66b2
 boto3==1.40.70  # AWS Private CA (CA_BACKEND=aws_pca) and S3 Object Lock audit storage
 # tests
 pytest==9.2.0
 httpx==0.28.1
+PyYAML==6.0.3  # the capability contract test reads spec/openapi.yaml

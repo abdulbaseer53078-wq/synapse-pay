@@ -28,6 +28,14 @@ CASCADES = Counter("cascade", "Transactions that failed over, by whether a backu
 HOST_ATTEMPTS = Counter("host_attempts", "Attempts per host: answered (approved or a final decline) or failed",
                         ["host", "outcome"])
 HOST_UP = Gauge("host_up", "1 if the host can take traffic, by host and rail", ["host", "rail"])
+# PR 10. Labelled by the route's template (/api/v1/transactions/{transaction_id}/refund), never the raw path, so one
+# metric series per endpoint rather than one per transaction id.
+HTTP_LATENCY = Histogram("http_request_duration_seconds", "API request latency", ["method", "route", "status"],
+                         buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20))
+# A write the ledger refused because it didn't balance, or an edit to a row that may not change: a code bug or an
+# attack, never normal. Paired with the database-read gauges in db_metrics, which catch what bypasses the code.
+LEDGER_INTEGRITY_REFUSED = Counter("synapse_ledger_imbalance", "Ledger writes refused for breaking an invariant",
+                                   ["reason"])
 
 
 def trace_id_from(header: str | None) -> str:

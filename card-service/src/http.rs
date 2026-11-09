@@ -34,6 +34,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/card/tokens", post(tokenize))
         .route("/card/tokens/index", get(token_index))
         .route("/card/tokens/{token}", delete(revoke_token))
+        .route("/card/reversals/{transaction_id}", get(reversal_state))
         .route("/health", get(health))
         .route("/internal/v1/hosts/health", get(fleet_health))
         .with_state(state)
@@ -162,6 +163,18 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
 
 /// One row per acquirer, for the backend's health poller (Step 14.8). A pool with no live socket is DOWN; the
 /// fleet itself is only Degraded when some of its hosts are. `latency_ms` stays absent until the pool measures it.
+/// Where an owed reversal stands (PR 3): the API backend's recovery sweep resolves a stuck payment from it.
+async fn reversal_state(State(state): State<Arc<AppState>>, Path(transaction_id): Path<String>) -> Response {
+    let Some(queue) = &state.flow.reversals else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "NO_REVERSAL_QUEUE"}))).into_response();
+    };
+    match queue.state(&transaction_id).await {
+        Ok(Some(s)) => Json(json!({"transaction_id": transaction_id, "state": s})).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "NOT_QUEUED"}))).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": e}))).into_response(),
+    }
+}
+
 async fn fleet_health(State(state): State<Arc<AppState>>) -> Json<Vec<serde_json::Value>> {
     let mut results = Vec::with_capacity(state.fleet.pools.len());
     for (host_id, pool) in &state.fleet.pools {

@@ -96,6 +96,18 @@ class HttpCardProcessor:
             raise CardServiceUnavailable(f"card service answered HTTP {response.status_code}")
         return True
 
+    def reversal_state(self, transaction_id: UUID) -> str | None:
+        """Where the card service's durable queue stands on this payment's reversal (PR 3); None if never queued."""
+        try:
+            response = self.client.get(f"/card/reversals/{transaction_id}")
+        except httpx.TransportError as e:
+            raise CardServiceUnavailable("the card service is unavailable") from e
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise CardServiceUnavailable(f"card service answered HTTP {response.status_code}")
+        return response.json()["state"]
+
     def checkout_key(self) -> dict:
         try:
             response = self.client.get("/card/checkout-key")

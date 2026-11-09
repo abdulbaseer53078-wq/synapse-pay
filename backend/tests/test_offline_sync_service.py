@@ -213,11 +213,40 @@ def _edge_item(private, terminal=None, **fields) -> dict:
     return {**item, "signature": base64.b64encode(signature).decode()}
 
 
-def _edge_service(status="ACTIVE"):
+class FakeChain:
+    """The cloud's chain memory (PR 6), in memory: hashes accepted per edge, edges flagged, offline spend."""
+
+    def __init__(self):
+        self.links: dict[int, str] = {}
+        self.flagged_reason = None
+        self.spent = 0
+
+    def exclusive(self, edge_node_id):
+        import contextlib
+        return contextlib.nullcontext()
+
+    def flagged(self, edge_node_id):
+        return self.flagged_reason
+
+    def head(self, edge_node_id, seqs):
+        last = max(self.links, default=0)
+        return last, {q: h for q, h in self.links.items() if q in (*seqs, last)}
+
+    def record(self, edge_node_id, links):
+        self.links.update(links)
+
+    def flag(self, edge_node_id, reason):
+        self.flagged_reason = reason
+
+    def offline_total(self, terminal_id, since, until, excluding_key):
+        return self.spent
+
+
+def _edge_service(status="ACTIVE", chain=None):
     private, pem = _key()
     engine = FakeEngine()
     service = OfflineSyncService(MethodRegistry([OfflineMethodAdapter()]), FakeRepo(None), engine, _verify,
-                                 edges=FakeEdges(pem, status))
+                                 edges=FakeEdges(pem, status), chain=chain or FakeChain())
     return service, engine, private
 
 

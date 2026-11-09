@@ -45,7 +45,7 @@ class FakePsp:
                     "reason": "INSUFFICIENT_FUNDS"}
         return {"psp_transaction_id": psp_transaction_id, "status": "PENDING"}
 
-    def refund(self, psp_transaction_id, amount):
+    def refund(self, psp_transaction_id, amount, refund_id=None):
         if amount > 100000:
             raise PspDeclined("BAD_REFUND", "amount exceeds the original")
         self.refunds.append((psp_transaction_id, amount))

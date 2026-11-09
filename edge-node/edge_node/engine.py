@@ -9,7 +9,7 @@ edge reads the client certificate (it is checked against the merchant's terminal
 import hashlib
 import json
 import uuid
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Callable
 
 from fastapi import FastAPI
@@ -21,8 +21,7 @@ from edge_node import crypto, db
 from edge_node.config import EdgeConfig
 from edge_node.rules import RulesExpired, RulesMissing, RulesTampered, current_rules
 
-# The merchant's day for the per-day limit: India has one time zone and no DST, so a fixed offset is exact.
-MERCHANT_DAY = timezone(timedelta(hours=5, minutes=30))
+ROLLING = timedelta(hours=24)  # the per_day offline limit's window
 RAILS = ("CARD", "UPI", "WALLET", "QR")  # what an offline sale can be (the sync item's underlying_rail)
 RECEIPT_NOTE = "OFFLINE - AWAITING BANK APPROVAL"
 
@@ -96,27 +95,33 @@ def create_app(cfg: EdgeConfig, now: Callable[[], datetime] = lambda: datetime.n
                     return error(422, "OFFLINE_LIMIT_EXCEEDED",
                                  f"offline payments are limited to {rules.offline_limits.per_transaction}",
                                  "HARD_DECLINE")
-                day_start = _iso(at.astimezone(MERCHANT_DAY).replace(hour=0, minute=0, second=0, microsecond=0))
-                (today,) = conn.execute(
-                    "SELECT coalesce(sum(amount), 0) FROM offline_queue"
-                    " WHERE terminal_id = ? AND created_at >= ? AND status != 'FAILED'",
-                    (req.terminal_id, day_start)).fetchone()
-                if today + req.amount > rules.offline_limits.per_day:
+                # PR 6 (F-06): a rolling 24 hours, not the calendar day (no fresh allowance at midnight), and
+                # anything not yet synced counts whatever its timestamp, so winding the clock on can't free it.
+                (exposure,) = conn.execute(
+                    "SELECT coalesce(sum(amount), 0) FROM offline_queue WHERE terminal_id = ? AND status != 'FAILED'"
+                    " AND (created_at >= ? OR status IN ('PENDING_OFFLINE', 'SYNCING'))",
+                    (req.terminal_id, _iso(at - ROLLING))).fetchone()
+                if exposure + req.amount > rules.offline_limits.per_day:
                     conn.execute("COMMIT")
-                    return error(422, "OFFLINE_LIMIT_EXCEEDED", "this terminal's offline total for today is reached",
-                                 "HARD_DECLINE")
+                    return error(422, "OFFLINE_LIMIT_EXCEEDED",
+                                 "this terminal's offline total for the last 24 hours is reached", "HARD_DECLINE")
                 reference, created = str(uuid.uuid4()), _iso(at)
                 item = {"offline_reference": reference, "local_timestamp": created,
                         "idempotency_key": str(req.idempotency_key), "amount": req.amount, "currency": req.currency,
                         "payment_method": "OFFLINE", "underlying_rail": req.payment_method,
                         "terminal_id": req.terminal_id, "merchant_id": req.merchant_id,
                         "method_details": req.method_details, "edge_node_id": cfg.edge_node_id}
-                item["signature"] = crypto.sign(cfg.signing_key_pem, item)
+                head = conn.execute("SELECT last_seq, last_hash FROM chain_head").fetchone()
+                item["edge_seq"], item["prev_hash"] = (head[0] + 1, head[1]) if head else (1, "")
+                item["signature"] = crypto.sign(cfg.signing_key_pem, item)  # the chain fields are signed too
                 conn.execute(
                     "INSERT INTO offline_queue (offline_reference, idempotency_key, request_hash, terminal_id, amount,"
-                    " payload_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " payload_json, created_at, updated_at, edge_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (reference, str(req.idempotency_key), request_hash, req.terminal_id, req.amount,
-                     json.dumps(item), created, created))
+                     json.dumps(item), created, created, item["edge_seq"]))
+                conn.execute("INSERT INTO chain_head (singleton, last_seq, last_hash) VALUES (1, ?, ?)"
+                             " ON CONFLICT (singleton) DO UPDATE SET last_seq = excluded.last_seq,"
+                             " last_hash = excluded.last_hash", (item["edge_seq"], crypto.chain_hash(item)))
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")

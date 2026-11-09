@@ -218,9 +218,14 @@ class PaymentMethodAdapter(Protocol):
     def capture(self, transaction_id: UUID, amount: int) -> MethodResult:
         """Capture a previously authorized payment. Raise UnsupportedOperation if the method cannot."""
 
-    def refund(self, transaction_id: UUID, amount: int, reference: str | None = None) -> MethodResult:
+    def refund(self, transaction_id: UUID, amount: int, reference: str | None = None,
+               refund_id: str | None = None) -> MethodResult:
         """Refund all or part of a payment. `reference` is the network's id, as the engine stored it —
-        adapters are stateless and cannot look it up."""
+        adapters are stateless and cannot look it up. `refund_id` is our id for this refund, sent as the network's
+        idempotency key, so re-sending a refund whose answer was lost can't refund twice (PR 4)."""
+
+    def void(self, transaction_id: UUID, reference: str | None = None) -> MethodResult:
+        """Release an authorization hold that was never captured. Raise UnsupportedOperation if the method cannot."""
 
     def status(self, transaction_id: UUID, reference: str | None = None) -> MethodResult:
         """Ask the network for the authoritative status (reconciliation, stuck payments)."""

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
-use crate::iso_host::{IsoHostConfig, IsoHostConnector, Originals};
+use crate::iso_host::{IsoHostConfig, IsoHostConnector, Original, Originals};
 use crate::link::{Link, LinkConfig, LinkError, LinkState};
 use crate::{BoxFuture, HostConnector, HostError, HostResponse, HostState, HostStatus, RequestContext, Transaction};
 
@@ -119,6 +119,15 @@ impl IsoHostPool {
             conn.link().wait_up(deadline.saturating_duration_since(Instant::now())).await;
         }
         self.connections_up()
+    }
+
+    /// Every connection of a pool shares one record of originals, so asking the first is asking them all.
+    pub fn original(&self, transaction_id: &str) -> Option<Original> {
+        self.shared.conns[0].original(transaction_id)
+    }
+
+    pub fn restore_original(&self, transaction_id: &str, original: Original) {
+        self.shared.conns[0].restore_original(transaction_id, original);
     }
 
     pub fn connections_up(&self) -> usize {

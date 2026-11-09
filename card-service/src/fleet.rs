@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use host_connector::iso_host::Original;
 use host_connector::pool::IsoHostPool;
 use host_connector::stan::StanSource;
 use host_connector::{BoxFuture, HostConnector, HostError, HostResponse, HostState, HostStatus, RequestContext,
@@ -46,6 +47,17 @@ impl Fleet {
 
     fn mint_stan(&self) -> String {
         self.stans.next()
+    }
+
+    /// The host that holds `transaction_id`'s original, and what a reversal must quote. At most one does: the
+    /// fleet moves on only when a request was never sent, so only the host it reached remembers it.
+    pub fn original(&self, transaction_id: &str) -> Option<(String, Original)> {
+        self.pools.iter().find_map(|(host, pool)| pool.original(transaction_id).map(|o| (host.clone(), o)))
+    }
+
+    /// Puts a saved original back on its host after a restart. False if this fleet has no such host.
+    pub fn restore_original(&self, host: &str, transaction_id: &str, original: Original) -> bool {
+        self.pools.get(host).map(|pool| pool.restore_original(transaction_id, original)).is_some()
     }
 }
 

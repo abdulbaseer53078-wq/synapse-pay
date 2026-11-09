@@ -12,11 +12,15 @@ from typing import Protocol
 
 class Alerter(Protocol):
     def tamper_detected(self, detail: str, checked: int, sequence: int | None) -> None: ...
+    def ops_alert(self, summary: str, severity: str, details: dict) -> None: ...
 
 
 class NullAlerter:
     def tamper_detected(self, detail: str, checked: int, sequence: int | None) -> None:
         return None
+
+    def ops_alert(self, summary: str, severity: str, details: dict) -> None:
+        print(f"ALERT ({severity}, no alert webhook configured): {summary}")
 
 
 class WebhookAlerter:
@@ -26,6 +30,20 @@ class WebhookAlerter:
         self.url = url
         self.routing_key = routing_key
         self.timeout = timeout
+
+    def ops_alert(self, summary: str, severity: str, details: dict) -> None:
+        """Anything an operator must look at now: a broken edge chain, money the bank and the ledger disagree on."""
+        self._send({"summary": summary, "severity": severity, "source": "synapsepay", "custom_details": details},
+                   summary)
+
+    def _send(self, payload: dict, detail: str) -> None:
+        body = json.dumps({"routing_key": self.routing_key, "event_action": "trigger", "payload": payload}).encode()
+        request = urllib.request.Request(self.url, data=body, method="POST",
+                                         headers={"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(request, timeout=self.timeout).close()
+        except (urllib.error.URLError, OSError) as exc:  # pragma: no cover - network dependent
+            print(f"ALERT DELIVERY FAILED ({type(exc).__name__}): {detail}")
 
     def tamper_detected(self, detail: str, checked: int, sequence: int | None) -> None:
         body = json.dumps({

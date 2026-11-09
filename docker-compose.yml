@@ -35,9 +35,24 @@ services:
     volumes:
       - ./observability/grafana/datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
       - ./observability/grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/synapsepay.yml:ro
-      - ./observability/grafana/failover.json:/etc/grafana/dashboards/failover.json:ro
+      - ./observability/grafana:/etc/grafana/dashboards:ro  # every *.json here is a dashboard
     ports:
       - "3001:3000"  # 3000 is the node-shop example
+  # PR 10: traces. Run the API with OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    profiles: [observability]
+    command: ["--config=/etc/otelcol/config.yml"]
+    volumes:
+      - ./observability/otel-collector.yml:/etc/otelcol/config.yml:ro
+    ports:
+      - "4318:4318"
+  tempo:
+    image: grafana/tempo:2.7.1
+    profiles: [observability]
+    command: ["-config.file=/etc/tempo.yml"]
+    volumes:
+      - ./observability/tempo.yml:/etc/tempo.yml:ro
 secrets:
   pagerduty_routing_key:
     file: ./observability/pagerduty_routing_key

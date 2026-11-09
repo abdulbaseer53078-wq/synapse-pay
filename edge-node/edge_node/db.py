@@ -58,6 +58,17 @@ MIGRATIONS: list[str] = [
         delivered_at      TEXT
     );
     """,
+    # 4. PR 6 (F-06): every queued item is chained, so the cloud can tell if one was dropped or reordered. The
+    # head lives here, not in the queue, so purging synced rows never breaks the chain.
+    """
+    CREATE TABLE chain_head (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        last_seq  INTEGER NOT NULL,
+        last_hash TEXT NOT NULL
+    );
+    ALTER TABLE offline_queue ADD COLUMN edge_seq INTEGER;
+    CREATE UNIQUE INDEX offline_queue_edge_seq_idx ON offline_queue (edge_seq);
+    """,
 ]
 
 

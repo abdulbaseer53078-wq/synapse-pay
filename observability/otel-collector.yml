@@ -1,0 +1,23 @@
+# PR 10: spans from the API (OTLP/HTTP on :4318) to Tempo. Anything that looks like a card number is removed first:
+# the API never puts one in a span, and this makes sure of it.
+receivers:
+  otlp:
+    protocols:
+      http: { endpoint: 0.0.0.0:4318 }
+processors:
+  redaction:
+    allow_all_keys: true
+    blocked_values:
+      - '\b\d{13,19}\b'  # a PAN-length run of digits
+    summary: info
+  batch: {}
+exporters:
+  otlp:
+    endpoint: tempo:4317
+    tls: { insecure: true }
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [redaction, batch]
+      exporters: [otlp]

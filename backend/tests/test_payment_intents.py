@@ -350,3 +350,14 @@ def ready(db, active):
     db.execute("UPDATE terminals SET certification_profile_id = %s, last_heartbeat_at = now()"
                " WHERE terminal_id = %s", (profile_id, active["terminal_id"]))
     return active
+
+
+def test_an_online_card_payment_lands_in_the_ledger(merchant_api, app_client, account, cards, db):
+    """PR 1: intents finish through their own repository, and post the SALE there, in the same transaction."""
+    paid = confirm(app_client, merchant_api().json()).json()
+    assert paid["status"] == "SUCCEEDED", paid
+    rows = db.execute(
+        "SELECT e.merchant_id::text, a.code, p.debit_amount, p.credit_amount FROM journal_entries e"
+        " JOIN ledger_postings p USING (journal_entry_id) JOIN accounts a USING (account_id)"
+        " WHERE e.transaction_id = (SELECT transaction_id FROM transactions) ORDER BY a.code").fetchall()
+    assert rows == [(account["merchant_id"], "1000", 50_000, 0), (account["merchant_id"], "2000", 0, 50_000)]

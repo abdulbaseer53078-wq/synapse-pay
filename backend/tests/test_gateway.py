@@ -47,7 +47,8 @@ def _free_port() -> int:
 def backend_port(settings, db):
     """The app, served over real HTTP for Envoy to reach (same database and CA as `client`)."""
     port = _free_port()
-    server = uvicorn.Server(uvicorn.Config(create_app(settings), host="127.0.0.1", port=port, log_level="warning"))
+    # 0.0.0.0: on Linux the container reaches the host through the bridge gateway, not the host's loopback
+    server = uvicorn.Server(uvicorn.Config(create_app(settings), host="0.0.0.0", port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     deadline = time.time() + 10
@@ -75,18 +76,25 @@ class Envoy:
     def start(self):
         shutil.copy(self.ca[2], self.dir / "crl.pem")  # the CA's current CRL, as a deploy would ship it
         subprocess.run(["docker", "run", "-d", "--rm", "--name", self.name, "-p", f"127.0.0.1:{self.port}:8443",
+                        "--add-host", "host.docker.internal:host-gateway",  # Docker Desktop has it; Linux doesn't
                         "-v", f"{self.dir}:/etc/synapse:ro", ENVOY_IMAGE, "-c", "/etc/synapse/envoy.yaml",
                         "--log-level", "warn"], check=True, capture_output=True)
         deadline = time.time() + 30
-        while True:
+        probe = ssl.create_default_context(cafile=self.ca[0])
+        while True:  # a TLS handshake, not a TCP connect: Docker's port proxy accepts before Envoy listens
             try:
-                with socket.create_connection(("127.0.0.1", self.port), timeout=1):
-                    return
+                with socket.create_connection(("127.0.0.1", self.port), timeout=1) as raw:
+                    probe.wrap_socket(raw, server_hostname="localhost").close()
+                return
+            except ssl.SSLError as e:
+                if not isinstance(e, ssl.SSLEOFError):
+                    return  # Envoy answered the handshake (and wants a client certificate)
             except OSError:
-                if time.time() > deadline:
-                    logs = subprocess.run(["docker", "logs", self.name], capture_output=True, text=True)
-                    raise AssertionError(f"Envoy did not start:\n{logs.stdout}{logs.stderr}")
-                time.sleep(0.2)
+                pass
+            if time.time() > deadline:
+                logs = subprocess.run(["docker", "logs", self.name], capture_output=True, text=True)
+                raise AssertionError(f"Envoy did not start:\n{logs.stdout}{logs.stderr}")
+            time.sleep(0.2)
 
     def restart(self):
         """Envoy reads the CRL at startup (see gateway/envoy.yaml)."""

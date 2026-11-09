@@ -14,6 +14,9 @@
 //! | `HOST_TIMEOUT_MS` | how long each host gets to answer, default 1500 |
 //! | `AUDIT_LOG_PATH` | JSON Lines file for redacted ISO 8583 audit records (required) |
 //! | `STAN_INSTANCE`, `STAN_INSTANCES` | this process's STAN slot, unique across every card-service in every region; default 0 of 1 |
+//! | `VAULT_DATABASE_URL` | card-service's own Postgres: the token vault and the durable reversal queue |
+//! | `CARD_DATA_STORAGE` | `sandbox` to allow the two above; startup fails without it (frozen pending PCI review) |
+//! | `REVERSAL_RETRY_MS` | how often owed reversals are resent, default 10000 |
 //!
 //! In fleet mode every host reads `<ID>_ADDR` (required). The shared `HOST_SERVER_NAME`, `HOST_CA`,
 //! `HOST_CLIENT_CERT`, `HOST_CLIENT_KEY`, `HOST_DIALECT` and `HOST_POOL_SIZE` apply to every host, and
@@ -30,6 +33,7 @@ use std::time::Duration;
 
 use card_service::fleet::Fleet;
 use card_service::flow::{CardFlow, Timeouts};
+use card_service::reversals::ReversalQueue;
 use card_service::hsm::{Hsm, SimHsm};
 use card_service::http::AppState;
 use card_service::vault::{MemoryStore, NetworkTokenProvider, NoNetworkTokens, SimulatedTokenService, Vault, VaultStore};
@@ -117,6 +121,13 @@ fn start_pool(host: &str, prefix: Option<&str>, audit: Arc<dyn AuditSink>, stans
 
 #[tokio::main]
 async fn main() {
+    // F-16 freeze: storing card data (vault, reversal queue) waits for the QSA review of docs/card-data-flow.md.
+    // Until then it is sandbox only, and asking for it without saying so stops startup rather than run silently.
+    let card_storage = env::var("CARD_DATA_STORAGE").as_deref() == Ok("sandbox");
+    if !card_storage && (env::var("VAULT_DATABASE_URL").is_ok() || env::var("VAULT_IN_MEMORY").is_ok()) {
+        fail("card-data storage is frozen pending PCI review: set CARD_DATA_STORAGE=sandbox (never in production) \
+              or unset VAULT_DATABASE_URL and VAULT_IN_MEMORY");
+    }
     let checkout = match env::var("SIM_HSM_CHECKOUT_KEY") {
         Ok(path) => {
             use p256::pkcs8::DecodePrivateKey;
@@ -190,7 +201,19 @@ async fn main() {
     };
     let vault = store.map(|store| Arc::new(Vault { store, hsm: hsm.clone(), network_tokens }));
     eprintln!("card-service: token vault {}", if vault.is_some() { "on" } else { "off" });
-    let flow = CardFlow { hsm, host, timeouts, vault };
+    // PR 3: owed reversals outlive the request, in the same private database. Without it they are only logged.
+    let reversals = match env::var("VAULT_DATABASE_URL") {
+        Ok(url) => {
+            let queue = ReversalQueue::connect(&url, hsm.clone(), fleet.clone(), timeouts.reversal).await
+                .unwrap_or_else(|e| fail(&format!("reversal queue database: {e}")));
+            let queue = Arc::new(queue);
+            tokio::spawn(queue.clone().run(Duration::from_millis(number("REVERSAL_RETRY_MS", 10_000))));
+            Some(queue)
+        }
+        Err(_) => None,
+    };
+    eprintln!("card-service: reversal queue {}", if reversals.is_some() { "on" } else { "off" });
+    let flow = CardFlow { hsm, host, timeouts, vault, reversals };
 
     let state = Arc::new(AppState { flow, fleet });
     let addr = env::var("CARD_SERVICE_ADDR").unwrap_or_else(|_| "127.0.0.1:7070".into());

@@ -22,6 +22,10 @@ before the SDK and terminal producers exist.
 
 upi-poll runs forever, asking the PSP for the authoritative status of UPI payments a lost webhook left PENDING
 (Step 10A). Webhooks are primary; this is the fallback.
+
+sweep runs forever (PR 3), every 2 minutes: fails requests that died before reaching the network and frees their
+idempotency keys, resolves card payments whose reversal the card service's queue has since sent, and re-sends
+refunds left PENDING. Needs CARD_SERVICE_URL, UPI_PSP_URL and WALLET_URL like the API.
 """
 import os
 import sys
@@ -33,7 +37,9 @@ from psycopg_pool import ConnectionPool
 
 from app.application.audit import AuditVerifier
 from app.application.events import EventRelay
-from app.application.transactions import apply_method_result
+from app.application.fees import ConfigFeePolicy
+from app.application.recovery import sweep_async_pending
+from app.config import fee_bps_from_env
 from app.infrastructure.audit_alerts import NullAlerter, WebhookAlerter
 from app.infrastructure.audit_worm import worm_from_env
 from app.infrastructure.postgres_audit import PostgresAuditStore
@@ -41,7 +47,7 @@ from app.infrastructure.postgres_terminals import PostgresTerminalRepository
 from app.infrastructure.postgres_transactions import PostgresTransactionRepository
 
 JOBS = ("refresh-health", "relay-events", "audit-ingest", "audit-publish", "verify-audit", "audit-seed", "upi-poll",
-        "audit-new-epoch")
+        "audit-new-epoch", "sweep")
 USAGE = f"usage: python -m app.jobs {' | '.join(JOBS)}"
 
 
@@ -63,6 +69,9 @@ def main(argv: list[str]) -> None:
             return
         if job == "upi-poll":
             _upi_poll(pool)
+            return
+        if job == "sweep":
+            _sweep(pool)
             return
         store = PostgresAuditStore(pool)
         if job == "audit-ingest":
@@ -103,20 +112,39 @@ def _upi_poll(pool: ConnectionPool) -> None:
         ("UPI", UpiMethodAdapter(HttpUpiPsp(os.environ["UPI_PSP_URL"]))),
         ("WALLET", WalletMethodAdapter(HttpWallet(os.environ.get("WALLET_URL", "http://127.0.0.1:8090")))),
     ]
-    repo = PostgresTransactionRepository(pool)
+    # The poller settles payments too, so it posts them to the ledger with the same fee rates as the API.
+    repo = PostgresTransactionRepository(pool, ConfigFeePolicy(fee_bps_from_env()))
     stale_after = int(os.environ.get("UPI_POLL_STALE_SECONDS", "300"))
 
-    def once() -> int:
-        polled = 0
-        for method, adapter in sweeps:
-            for transaction_id, terminal_id, reference in repo.stale_pending(method, stale_after):
-                polled += 1
-                result = adapter.status(transaction_id, reference)
-                if result.status != "PENDING":  # still pending is a valid answer: leave it for the next pass
-                    apply_method_result(repo, transaction_id, terminal_id, result)
-        return polled
+    _forever(lambda: sweep_async_pending(repo, sweeps, stale_after), idle=5.0,
+             done=lambda n: print(f"polled {n} pending transaction(s)"))
 
-    _forever(once, idle=5.0, done=lambda n: print(f"polled {n} pending transaction(s)"))
+
+def _sweep(pool: ConnectionPool) -> None:
+    """PR 3's recovery sweeps (app/application/recovery.py), plus PR 4's PENDING refunds."""
+    from app.application.methods import MethodRegistry
+    from app.application.recovery import sweep_card_pending, sweep_stuck_keys
+    from app.application.refunds import RefundService
+    from app.infrastructure.card_service_client import HttpCardProcessor
+    from app.infrastructure.methods.card import CardMethodAdapter
+    from app.infrastructure.methods.qr import QrMethodAdapter
+    from app.infrastructure.methods.upi import UpiMethodAdapter
+    from app.infrastructure.methods.wallet import HttpWallet, WalletMethodAdapter
+    from app.infrastructure.postgres_refunds import PostgresRefunds
+    from app.infrastructure.upi_client import HttpUpiPsp
+
+    fees = ConfigFeePolicy(fee_bps_from_env())
+    repo = PostgresTransactionRepository(pool, fees)
+    cards = HttpCardProcessor(os.environ.get("CARD_SERVICE_URL", "http://127.0.0.1:7070"))
+    rails = MethodRegistry([CardMethodAdapter(cards), UpiMethodAdapter(HttpUpiPsp(os.environ["UPI_PSP_URL"])),
+                            WalletMethodAdapter(HttpWallet(os.environ.get("WALLET_URL", "http://127.0.0.1:8090")))])
+    refunds = RefundService(PostgresRefunds(pool, fees), MethodRegistry([*rails.adapters(), QrMethodAdapter(rails)]))
+
+    def once() -> int:
+        return (sweep_stuck_keys(repo) + sweep_card_pending(repo, cards)
+                + refunds.resolve_pending(older_than_seconds=60))
+
+    _forever(once, idle=120.0, done=lambda n: print(f"swept {n} stuck payment(s) and refund(s)"))
 
 
 def _publish(store: PostgresAuditStore) -> None:
