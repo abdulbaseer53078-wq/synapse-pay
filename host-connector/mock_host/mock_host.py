@@ -207,15 +207,20 @@ def main():
 
     listener = socket.create_server(("127.0.0.1", args.port))
     log(f"LISTENING {listener.getsockname()[1]}")
-    while True:
-        raw, _ = listener.accept()
+    def handshake_and_serve(raw):
         try:
             conn = tls.wrap_socket(raw, server_side=True)
         except (ssl.SSLError, OSError) as e:
             log(f"TLS handshake refused: {e.__class__.__name__}")
             raw.close()
-            continue
-        threading.Thread(target=serve, args=(dialect, conn, args.sleep, set(args.soft_decline_amount)), daemon=True).start()
+            return
+        serve(dialect, conn, args.sleep, set(args.soft_decline_amount))
+
+    while True:
+        raw, _ = listener.accept()
+        # Handshake off the accept loop: a client whose handshake stalls (a proxy swallowing replies) must not
+        # stop every later connection from being accepted.
+        threading.Thread(target=handshake_and_serve, args=(raw,), daemon=True).start()
 
 
 if __name__ == "__main__":

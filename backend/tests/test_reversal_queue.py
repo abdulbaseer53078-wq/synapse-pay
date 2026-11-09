@@ -99,9 +99,11 @@ def test_an_owed_reversal_survives_a_restart_and_quotes_the_original(lab):
 
 def test_a_purchase_that_never_left_queues_nothing(lab):
     """Refused before sending: nothing reached the acquirer, so there is nothing to reverse or queue."""
+    # Refused from the start, so no connection ever exists. Refusing a live one isn't "never left": the card
+    # service only sees the reset when it writes, and on Linux that write can succeed, an unknown outcome.
+    lab["proxy"].refuse()
     service, url = lab["start"]()
     transaction_id = uuid4()
-    lab["proxy"].refuse()
     cards = HttpCardProcessor(url)
     result = cards.process(CardRequest(
         transaction_id=transaction_id, kind="PURCHASE", amount=4500, currency="INR",
