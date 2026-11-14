@@ -31,6 +31,24 @@ import javax.net.ssl.SSLSocketFactory;
 public final class TransactionSender {
     /** Same request, still running at the cloud (StillProcessing). A conflicting body is retryable false. */
     private static final Pattern STILL_PROCESSING = Pattern.compile("\"retryable\"\\s*:\\s*true");
+    private static final Pattern ERROR_MESSAGE = Pattern.compile("\"error_message\"\\s*:\\s*\"([^\"]+)\"");
+    private static final Pattern SUBSCRIPTION_REQUIRED_CODE =
+            Pattern.compile("\"error_code\"\\s*:\\s*\"SUBSCRIPTION_REQUIRED\"");
+
+    /** The human-readable message to show the cashier, or "Payment failed" if the body has none. */
+    public static String displayMessage(Response r) {
+        java.util.regex.Matcher m = ERROR_MESSAGE.matcher(new String(r.body, java.nio.charset.StandardCharsets.UTF_8));
+        return m.find() ? m.group(1) : "Payment failed";
+    }
+
+    /**
+     * True when the merchant's subscription does not cover offline payments.
+     * Show a message prompting them to upgrade; do not retry.
+     */
+    public static boolean isSubscriptionRequired(Response r) {
+        return SUBSCRIPTION_REQUIRED_CODE.matcher(
+                new String(r.body, java.nio.charset.StandardCharsets.UTF_8)).find();
+    }
 
     public static final class Response {
         public final int status;
