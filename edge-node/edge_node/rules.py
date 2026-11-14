@@ -56,6 +56,8 @@ class Rules:
     routing_rules: dict
     fraud_thresholds: dict
     token_index: dict
+    # The merchant has no paid plan: the cloud zeroes the limits and says why, so the till can say so too.
+    subscription_required: bool = False
 
 
 def _time(value: str) -> datetime:
@@ -79,7 +81,8 @@ def _check(body: dict, cfg: EdgeConfig) -> Rules:
         offline_limits=OfflineLimits(int(limits["per_transaction"]), int(limits["per_day"]),
                                      int(limits["max_age_minutes"])),
         terminals=frozenset(body.get("terminals") or []), routing_rules=body.get("routing_rules") or {},
-        fraud_thresholds=body.get("fraud_thresholds") or {}, token_index=body.get("token_index") or {})
+        fraud_thresholds=body.get("fraud_thresholds") or {}, token_index=body.get("token_index") or {},
+        subscription_required=body.get("subscription_required") == "SUBSCRIPTION_REQUIRED")
 
 
 def _raise_high_water(conn: sqlite3.Connection, t: datetime) -> datetime:

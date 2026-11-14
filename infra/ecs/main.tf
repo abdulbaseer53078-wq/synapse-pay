@@ -45,6 +45,7 @@ variable "primary" {
     private_subnet_ids       = list(string)
     certificate_arn          = string
     database_url_secret_arn  = string
+    reversal_database_url_secret_arn = string
     kafka_bootstrap_servers  = string
     workers_desired          = number
     api_environment          = optional(map(string), {})
@@ -65,6 +66,7 @@ variable "secondary" {
     private_subnet_ids       = list(string)
     certificate_arn          = string
     database_url_secret_arn  = string
+    reversal_database_url_secret_arn = string
     kafka_bootstrap_servers  = string
     workers_desired          = number
     api_environment          = optional(map(string), {})
@@ -107,6 +109,7 @@ module "primary" {
   private_subnet_ids       = var.primary.private_subnet_ids
   certificate_arn          = var.primary.certificate_arn
   database_url_secret_arn  = var.primary.database_url_secret_arn
+  reversal_database_url_secret_arn = var.primary.reversal_database_url_secret_arn
   kafka_bootstrap_servers  = var.primary.kafka_bootstrap_servers
   workers_desired          = var.primary.workers_desired
   api_environment          = var.primary.api_environment
@@ -133,6 +136,7 @@ module "secondary" {
   private_subnet_ids       = var.secondary.private_subnet_ids
   certificate_arn          = var.secondary.certificate_arn
   database_url_secret_arn  = var.secondary.database_url_secret_arn
+  reversal_database_url_secret_arn = var.secondary.reversal_database_url_secret_arn
   kafka_bootstrap_servers  = var.secondary.kafka_bootstrap_servers
   workers_desired          = var.secondary.workers_desired
   api_environment          = var.secondary.api_environment

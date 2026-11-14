@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.15.0
+  version: 1.16.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
-    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook.
+    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook. 1.16.0 adds merchant subscriptions: POST /v1/subscriptions/upgrade and SUBSCRIPTION_CONFLICT.
 servers:
   - url: /api
 # Merchant backends use OAuth2; terminals use mTLS. Either satisfies a request.
@@ -449,6 +449,38 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
+  /v1/subscriptions/upgrade:
+    post:
+      operationId: upgradeSubscription
+      summary: Move a merchant to an active PRO plan (platform admin)
+      description: >-
+        Since 1.16.0. Offline (edge node) payments need an ACTIVE PRO or ENTERPRISE plan whose period hasn't ended;
+        a merchant with no plan is on FREE. Starts a 30-day PRO period; audited. Platform admin only until a billing
+        provider takes payment for plans. Safe to retry: a merchant already on an active PRO period is returned
+        unchanged (the period is not extended). 409 SUBSCRIPTION_CONFLICT for a merchant on an active ENTERPRISE
+        plan, since moving to PRO would be a downgrade. 422 MERCHANT_NOT_FOUND for an unknown merchant.
+      security: [{ OAuth2ClientCredentials: [registry:admin] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [merchant_id]
+              properties:
+                merchant_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The merchant's subscription after the upgrade.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
   /v1/card-tokens:
     post:
       operationId: createCardToken
@@ -1936,6 +1968,18 @@ components:
         certificate_number: { type: string, maxLength: 128, description: The scheme's own reference. }
         valid_from: { type: string, format: date-time, description: Default now. }
         valid_until: { type: string, format: date-time }
+    Subscription:
+      type: object
+      additionalProperties: false
+      required: [merchant_id, tier, status, current_period_end]
+      properties:
+        merchant_id: { type: string, format: uuid }
+        tier: { type: string, enum: [FREE, PRO, ENTERPRISE] }
+        status: { type: string, enum: [ACTIVE, PAST_DUE, CANCELED] }
+        current_period_end:
+          type: [string, 'null']
+          format: date-time
+          description: When the paid period ends. null for the implicit FREE plan of a merchant with no subscription.
     Certification:
       type: object
       additionalProperties: false
@@ -2316,6 +2360,7 @@ components:
             - CHARGEBACK_NOT_DISPUTABLE
             - CHARGEBACK_EVIDENCE_LATE
             - TRANSACTION_IN_DISPUTE
+            - SUBSCRIPTION_CONFLICT
           description: >-
             Machine-readable code. ISSUER_DECLINED (since 1.1.0) covers issuer declines without a more
             specific code; error_category says whether it's soft or hard. Values are added over time, so

@@ -44,6 +44,11 @@ variable "database_url_secret_arn" {
   description = "Secrets Manager secret holding this region's DATABASE_URL"
 }
 
+variable "reversal_database_url_secret_arn" {
+  type        = string
+  description = "Secrets Manager secret holding card-service's own database URL (REVERSAL_DATABASE_URL): owed reversals, card-free outside the sandbox"
+}
+
 variable "kafka_bootstrap_servers" {
   type        = string
   description = "This region's Kafka brokers"
@@ -118,7 +123,7 @@ data "aws_region" "current" {}
 locals {
   log_group  = "/synapsepay/${var.name}"
   slots      = { for i in range(var.card_service_instances) : tostring(i) => var.stan_offset + i }
-  all_secret = concat([var.database_url_secret_arn], values(var.api_secrets), values(var.card_service_secrets), values(var.gateway_secrets))
+  all_secret = concat([var.database_url_secret_arn, var.reversal_database_url_secret_arn], values(var.api_secrets), values(var.card_service_secrets), values(var.gateway_secrets))
 
   api_environment = merge(var.api_environment, {
     CARD_SERVICE_URL        = "http://127.0.0.1:7070"
@@ -127,6 +132,8 @@ locals {
     KAFKA_BOOTSTRAP_SERVERS = var.kafka_bootstrap_servers
   })
   api_secrets = merge(var.api_secrets, { DATABASE_URL = var.database_url_secret_arn })
+  # Its own database, not the API's: the card-data-path sidecar gets no main-database credentials.
+  card_secrets = merge(var.card_service_secrets, { REVERSAL_DATABASE_URL = var.reversal_database_url_secret_arn })
 
   logs = {
     logDriver = "awslogs"
@@ -141,7 +148,7 @@ locals {
 # ECS wants [{name, value}] / [{name, valueFrom}] lists, not maps.
 locals {
   env     = { for k, m in { api = local.api_environment, card = var.card_service_environment } : k => [for n, v in m : { name = n, value = v }] }
-  secrets = { for k, m in { api = local.api_secrets, card = var.card_service_secrets, gateway = var.gateway_secrets } : k => [for n, v in m : { name = n, valueFrom = v }] }
+  secrets = { for k, m in { api = local.api_secrets, card = local.card_secrets, gateway = var.gateway_secrets } : k => [for n, v in m : { name = n, valueFrom = v }] }
 }
 
 resource "aws_cloudwatch_log_group" "app" {
