@@ -457,8 +457,9 @@ paths:
         Since 1.16.0. Offline (edge node) payments need an ACTIVE PRO or ENTERPRISE plan whose period hasn't ended;
         a merchant with no plan is on FREE. Starts a 30-day PRO period; audited. Platform admin only until a billing
         provider takes payment for plans. Safe to retry: a merchant already on an active PRO period is returned
-        unchanged (the period is not extended). 409 SUBSCRIPTION_CONFLICT for a merchant on an active ENTERPRISE
-        plan, since moving to PRO would be a downgrade. 422 MERCHANT_NOT_FOUND for an unknown merchant.
+        unchanged (the period is not extended — period extension happens only through auto-renewal via POST
+        /v1/subscriptions/renew, not through this endpoint). 409 SUBSCRIPTION_CONFLICT for a merchant on an active
+        ENTERPRISE plan, since moving to PRO would be a downgrade. 422 MERCHANT_NOT_FOUND for an unknown merchant.
       security: [{ OAuth2ClientCredentials: [registry:admin] }]
       requestBody:
         required: true
