@@ -206,13 +206,16 @@ async fn main() {
     };
     let vault = store.map(|store| Arc::new(Vault { store, hsm: hsm.clone(), network_tokens }));
     eprintln!("card-service: token vault {}", if vault.is_some() { "on" } else { "off" });
-    // PR 3: owed reversals outlive the request, in the same private database. Without it they are only logged.
-    let reversals = match env::var("VAULT_DATABASE_URL") {
+    // PR 3: owed reversals outlive the request. Flaw #3: outside the sandbox the queue still runs, but F-16 keeps
+    // card data out of it, so rows are card-free MANUAL records for a person; only the sandbox resends them.
+    let reversals = match env::var("REVERSAL_DATABASE_URL").or_else(|_| env::var("VAULT_DATABASE_URL")) {
         Ok(url) => {
-            let queue = ReversalQueue::connect(&url, hsm.clone(), fleet.clone(), timeouts.reversal).await
-                .unwrap_or_else(|e| fail(&format!("reversal queue database: {e}")));
+            let queue = ReversalQueue::connect(&url, hsm.clone(), fleet.clone(), timeouts.reversal, card_storage)
+                .await.unwrap_or_else(|e| fail(&format!("reversal queue database: {e}")));
             let queue = Arc::new(queue);
-            tokio::spawn(queue.clone().run(Duration::from_millis(number("REVERSAL_RETRY_MS", 10_000))));
+            if card_storage {
+                tokio::spawn(queue.clone().run(Duration::from_millis(number("REVERSAL_RETRY_MS", 10_000))));
+            }
             Some(queue)
         }
         Err(_) => None,

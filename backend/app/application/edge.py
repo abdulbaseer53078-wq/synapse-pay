@@ -63,12 +63,15 @@ class RulesSigner(Protocol):
 
 class EdgeService:
     def __init__(self, repo: EdgeRepository, ca: CertificateAuthority, signer: RulesSigner | None,
-                 routing_rules: dict[str, tuple[str, ...]], now: Callable[[], datetime] | None = None):
+                 routing_rules: dict[str, tuple[str, ...]], now: Callable[[], datetime] | None = None,
+                 offline_entitled: Callable[[UUID], bool] | None = None):
         self.repo = repo
         self.ca = ca
         self.signer = signer
         self.routing_rules = routing_rules
         self.now = now or (lambda: datetime.now(UTC))
+        # merchant_id -> may take offline payments (a paid subscription). None: no plans, every merchant may.
+        self.offline_entitled = offline_entitled
 
     def _signer(self) -> RulesSigner:
         if self.signer is None:
@@ -103,14 +106,19 @@ class EdgeService:
         if node.status != "ACTIVE":
             raise Forbidden(f"edge node is {node.status}")
         issued = self.now()
+        # A merchant without a paid plan gets a valid rule set that allows no offline sale. Not a 403: the edge only
+        # syncs after a successful rules fetch, so refusing the fetch would strand sales it already took.
+        entitled = self.offline_entitled is None or self.offline_entitled(node.merchant_id)
         payload = {
             "edge_node_id": str(node.edge_node_id),
             "merchant_id": str(node.merchant_id),
             "rules_version": node.rules_version,
             "issued_at": _iso(issued),
             "expires_at": _iso(issued + RULES_TTL),
-            "offline_limits": {"per_transaction": node.limits.per_transaction, "per_day": node.limits.per_day,
-                               "max_age_minutes": node.limits.max_age_minutes},
+            "offline_limits": ({"per_transaction": node.limits.per_transaction, "per_day": node.limits.per_day,
+                                "max_age_minutes": node.limits.max_age_minutes} if entitled else
+                               {"per_transaction": 0, "per_day": 0, "max_age_minutes": node.limits.max_age_minutes}),
+            **({} if entitled else {"subscription_required": "SUBSCRIPTION_REQUIRED"}),
             "terminals": sorted(self.repo.active_terminals(node.merchant_id)),
             "routing_rules": {method: list(hosts) for method, hosts in sorted(self.routing_rules.items())},
             # Filled by Step 22 (fraud screening) and Step 23 (token vault index); signed from day one.

@@ -29,6 +29,8 @@ pub struct ReversalQueue {
     hsm: Arc<dyn Hsm>,
     fleet: Arc<Fleet>,
     timeout: Duration,
+    /// F-16: false outside the sandbox, where an owed reversal is recorded without card data, as MANUAL.
+    card_data: bool,
 }
 
 /// Postgres's own message (never parameter values), not the driver's bare "db error".
@@ -44,7 +46,7 @@ fn binding(transaction_id: &str) -> String {
 impl ReversalQueue {
     /// Connects and applies the migration (idempotent).
     /// shortcut: one connection, no TLS, like the vault's (same private database); pool and TLS with RDS.
-    pub async fn connect(url: &str, hsm: Arc<dyn Hsm>, fleet: Arc<Fleet>, timeout: Duration)
+    pub async fn connect(url: &str, hsm: Arc<dyn Hsm>, fleet: Arc<Fleet>, timeout: Duration, card_data: bool)
         -> Result<Self, String> {
         let (client, connection) = tokio_postgres::connect(url, NoTls).await.map_err(|e| e.to_string())?;
         tokio::spawn(async move {
@@ -53,23 +55,32 @@ impl ReversalQueue {
             }
         });
         client.batch_execute(MIGRATION).await.map_err(|e| e.to_string())?;
-        Ok(Self { client, hsm, fleet, timeout })
+        Ok(Self { client, hsm, fleet, timeout, card_data })
     }
 
     /// Saves the reversal of `original` (a purchase or authorisation the in-line reversals couldn't undo).
+    /// Without card data it can't be resent, so it is saved as MANUAL: durable, and the backend asks a person.
     /// Errors name the failing step, never card data.
     pub async fn enqueue(&self, original: &Transaction) -> Result<(), String> {
         let (host, sent) = self.fleet.original(&original.transaction_id)
             .ok_or("no host remembers sending it, so there is nothing to reverse")?;
-        let pan = ClearPan::from_digits(&original.card.pan).map_err(|e| e.to_string())?;
-        let sealed = self.hsm.vault_seal(&binding(&original.transaction_id), &pan).map_err(|e| e.to_string())?;
+        let (sealed, expiry, state) = if self.card_data {
+            let pan = ClearPan::from_digits(&original.card.pan).map_err(|e| e.to_string())?;
+            let sealed = self.hsm.vault_seal(&binding(&original.transaction_id), &pan).map_err(|e| e.to_string())?;
+            (Some(sealed), Some(original.card.expiry.as_str()), "PENDING")
+        } else {
+            eprintln!("REVERSAL OWED for {}: recorded without card data (F-16); needs a person",
+                      original.transaction_id);
+            (None, None, "MANUAL")
+        };
         self.client.execute(
             "INSERT INTO pending_reversals (transaction_id, host_id, sealed_pan, card_expiry, amount_minor, currency, \
-             acquirer_merchant_id, acquirer_terminal_id, original_mti, original_stan, original_transmitted) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (transaction_id) DO NOTHING",
-            &[&original.transaction_id, &host, &sealed, &original.card.expiry, &(original.amount_minor as i64),
+             acquirer_merchant_id, acquirer_terminal_id, original_mti, original_stan, original_transmitted, state) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::varchar) \
+             ON CONFLICT (transaction_id) DO NOTHING",
+            &[&original.transaction_id, &host, &sealed, &expiry, &(original.amount_minor as i64),
               &original.currency, &original.merchant_id, &original.terminal_id, &sent.mti, &sent.stan,
-              &sent.transmitted]).await.map_err(db)?;
+              &sent.transmitted, &state]).await.map_err(db)?;
         Ok(())
     }
 

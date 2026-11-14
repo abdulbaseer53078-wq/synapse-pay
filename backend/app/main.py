@@ -16,12 +16,14 @@ from app.api import card_tokens as card_tokens_api
 from app.api import chargebacks as chargebacks_api
 from app.api import reconciliation as reconciliation_api
 from app.api import refunds as refunds_api
+from app.api import subscriptions as subscriptions_api
 from app.api import certifications as certifications_api
 from app.api import (audit, capabilities, edge, errors, gateway, merchants, payment_intents, region, terminals,
                      transactions, upi_webhooks)
 from app.application import observability
 from app.application.audit import AuditQueryService
 from app.application.card_tokens import CardTokenService
+from app.application.subscriptions import SubscriptionService
 from app.application.chargebacks import ChargebackService
 from app.application.certification import CertificationAdmin, CertificationMatrix
 from app.application.fees import ConfigFeePolicy
@@ -66,6 +68,7 @@ from app.infrastructure.postgres_terminals import PostgresTerminalRepository
 from app.infrastructure.postgres_edge import PostgresEdgeNodes
 from app.infrastructure.postgres_edge_chain import PostgresEdgeChain
 from app.infrastructure.rules_signer import EcdsaRulesSigner
+from app.infrastructure.postgres_subscriptions import PostgresSubscriptions
 from app.infrastructure.postgres_transactions import PostgresTransactionRepository
 from app.infrastructure.postgres_webhooks import PostgresWebhookEvents
 from app.infrastructure.webhook_outbox import WebhookDispatcher
@@ -232,9 +235,10 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.state.audit = AuditQueryService(PostgresAuditStore(pool))
     # Step 17: what Route 53 probes. Up only if this region can take a payment: writable DB, a usable acquirer.
     app.state.region_health = RegionHealth(database_writable(pool), health.snapshot)
+    app.state.subscriptions = SubscriptionService(PostgresSubscriptions(pool))
     app.state.edge = EdgeService(PostgresEdgeNodes(pool), ca,
                                  EcdsaRulesSigner(settings.edge_rules_signing_key) if settings.edge_rules_signing_key else None,
-                                 settings.routing_rules)
+                                 settings.routing_rules, offline_entitled=app.state.subscriptions.has_paid_plan)
     errors.install(app)
     app.include_router(terminals.router)
     app.include_router(transactions.router)
@@ -248,6 +252,7 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.include_router(certifications_api.router)
     app.include_router(card_tokens_api.router)
     app.include_router(refunds_api.router)
+    app.include_router(subscriptions_api.router)
     app.include_router(reconciliation_api.router)
     app.include_router(chargebacks_api.router)
     app.include_router(certification_runs_api.router)
