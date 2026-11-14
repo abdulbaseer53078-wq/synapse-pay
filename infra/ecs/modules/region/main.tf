@@ -293,7 +293,7 @@ resource "aws_lb_listener" "api" {
 locals {
   gateway_only_headers = ["x-terminal-id", "x-edge-node-id", "x-forwarded-client-cert"]
   gateway_only_refusal = jsonencode({
-    error_code = "FORBIDDEN", error_message = "terminal and edge identities are only accepted through the mTLS gateway",
+    error_code     = "FORBIDDEN", error_message = "terminal and edge identities are only accepted through the mTLS gateway",
     error_category = "AUTHENTICATION_ERROR", retryable = false
   })
 }
