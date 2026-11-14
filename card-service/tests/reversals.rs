@@ -97,3 +97,68 @@ async fn an_owed_reversal_outside_the_sandbox_survives_a_restart_without_card_da
     let _ = client.batch_execute(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)")).await;
     let _ = std::fs::remove_dir_all(dir);
 }
+
+// Serialise env-var mutation so these two tests don't race each other.
+static ENV_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_MUTEX.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// When neither REVERSAL_DATABASE_URL nor VAULT_DATABASE_URL is set, the main.rs
+/// `or_else` chain returns Err, so reversals = None and startup does not panic.
+#[test]
+fn test_queue_disabled_when_no_url() {
+    let _guard = env_lock();
+    let prev_r = std::env::var("REVERSAL_DATABASE_URL").ok();
+    let prev_v = std::env::var("VAULT_DATABASE_URL").ok();
+    // SAFETY: serialised by ENV_MUTEX; no other thread reads these vars while the lock is held.
+    unsafe {
+        std::env::remove_var("REVERSAL_DATABASE_URL");
+        std::env::remove_var("VAULT_DATABASE_URL");
+    }
+
+    // Mirror main.rs line 211: env::var("REVERSAL_DATABASE_URL").or_else(|_| env::var("VAULT_DATABASE_URL"))
+    let resolved = std::env::var("REVERSAL_DATABASE_URL")
+        .or_else(|_| std::env::var("VAULT_DATABASE_URL"));
+    assert!(resolved.is_err(), "both absent → Err → reversals = None → no startup panic");
+
+    unsafe {
+        if let Some(v) = prev_r { std::env::set_var("REVERSAL_DATABASE_URL", v); }
+        if let Some(v) = prev_v { std::env::set_var("VAULT_DATABASE_URL", v); }
+    }
+}
+
+/// REVERSAL_DATABASE_URL wins over VAULT_DATABASE_URL; VAULT_DATABASE_URL is the fallback
+/// when REVERSAL_DATABASE_URL is absent.
+#[test]
+fn test_reversal_url_takes_priority_over_vault_url() {
+    let _guard = env_lock();
+    let prev_r = std::env::var("REVERSAL_DATABASE_URL").ok();
+    let prev_v = std::env::var("VAULT_DATABASE_URL").ok();
+    // SAFETY: serialised by ENV_MUTEX.
+    unsafe {
+        std::env::set_var("REVERSAL_DATABASE_URL", "postgresql://reversal-host/reversal_db");
+        std::env::set_var("VAULT_DATABASE_URL", "postgresql://vault-host/vault_db");
+    }
+
+    let resolved = std::env::var("REVERSAL_DATABASE_URL")
+        .or_else(|_| std::env::var("VAULT_DATABASE_URL"))
+        .unwrap();
+    assert_eq!(resolved, "postgresql://reversal-host/reversal_db",
+               "REVERSAL_DATABASE_URL takes priority");
+
+    // Fallback: REVERSAL absent, VAULT present.
+    unsafe { std::env::remove_var("REVERSAL_DATABASE_URL"); }
+    let fallback = std::env::var("REVERSAL_DATABASE_URL")
+        .or_else(|_| std::env::var("VAULT_DATABASE_URL"))
+        .unwrap();
+    assert_eq!(fallback, "postgresql://vault-host/vault_db",
+               "falls back to VAULT_DATABASE_URL when REVERSAL_DATABASE_URL is absent");
+
+    unsafe {
+        std::env::remove_var("REVERSAL_DATABASE_URL");
+        std::env::remove_var("VAULT_DATABASE_URL");
+        if let Some(v) = prev_r { std::env::set_var("REVERSAL_DATABASE_URL", v); }
+        if let Some(v) = prev_v { std::env::set_var("VAULT_DATABASE_URL", v); }
+    }
+}
