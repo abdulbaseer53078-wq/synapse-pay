@@ -53,7 +53,7 @@ def stack(tmp_path_factory, card_service_binary):
                 "--client-ca", str(d / "ca.pem"), "--sleep", "1"]
     mocks = {h: Process(mock_cmd) for h in HOSTS}
     proxies = {h: FaultProxy(int(mocks[h].wait_listening(10))) for h in HOSTS}
-    env = {**os.environ, "SIM_HSM_BDK_HEX": TEST_BDK_HEX, "HOSTS": ",".join(HOSTS),
+    env = {**os.environ, "SIM_HSM_BDK_HEX": TEST_BDK_HEX, "CARD_DATA_STORAGE": "sandbox", "HOSTS": ",".join(HOSTS),
            **{f"{h.upper()}_ADDR": f"127.0.0.1:{proxies[h].port}" for h in HOSTS},
            "HOST_SERVER_NAME": "localhost", "HOST_CA": str(d / "ca.pem"), "HOST_CLIENT_CERT": str(d / "client.pem"),
            "HOST_CLIENT_KEY": str(d / "client-key.pem"), "HOST_DIALECT": str(dialect), "HOST_POOL_SIZE": "2",

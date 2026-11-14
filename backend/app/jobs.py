@@ -30,6 +30,7 @@ refunds left PENDING. Needs CARD_SERVICE_URL, UPI_PSP_URL and WALLET_URL like th
 import os
 import sys
 import time
+from datetime import timedelta
 from uuid import uuid4
 
 from psycopg.types.json import Jsonb
@@ -49,6 +50,10 @@ from app.infrastructure.postgres_transactions import PostgresTransactionReposito
 JOBS = ("refresh-health", "relay-events", "audit-ingest", "audit-publish", "verify-audit", "audit-seed", "upi-poll",
         "audit-new-epoch", "sweep")
 USAGE = f"usage: python -m app.jobs {' | '.join(JOBS)}"
+# Flaw #9: finished idempotency keys are kept this long, then purged by `sweep`. Longer than the 24 h usual for
+# card APIs because an edge node resends a sale it never got an answer for, possibly days later (its rules last
+# 72 h): a key purged before that resend would charge the customer twice.
+IDEMPOTENCY_KEY_RETENTION = timedelta(days=7)
 
 
 def _alerter():
@@ -142,7 +147,8 @@ def _sweep(pool: ConnectionPool) -> None:
 
     def once() -> int:
         return (sweep_stuck_keys(repo) + sweep_card_pending(repo, cards)
-                + refunds.resolve_pending(older_than_seconds=60))
+                + refunds.resolve_pending(older_than_seconds=60)
+                + repo.purge_done_keys(IDEMPOTENCY_KEY_RETENTION))
 
     _forever(once, idle=120.0, done=lambda n: print(f"swept {n} stuck payment(s) and refund(s)"))
 

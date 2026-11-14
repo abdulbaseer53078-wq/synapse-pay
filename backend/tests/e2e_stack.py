@@ -117,7 +117,7 @@ def acquirer(tmp_path_factory, card_service_binary):
                     "--client-ca", str(d / "ca.pem"), "--sleep", "5"])
     host_port = mock.wait_listening(10)
     audit = d / "iso-audit.jsonl"
-    env = {**os.environ, "SIM_HSM_BDK_HEX": TEST_BDK_HEX, "HOST_ADDR": f"127.0.0.1:{host_port}",
+    env = {**os.environ, "SIM_HSM_BDK_HEX": TEST_BDK_HEX, "CARD_DATA_STORAGE": "sandbox", "HOST_ADDR": f"127.0.0.1:{host_port}",
            "HOST_SERVER_NAME": "localhost", "HOST_CA": str(d / "ca.pem"), "HOST_CLIENT_CERT": str(d / "client.pem"),
            "HOST_CLIENT_KEY": str(d / "client-key.pem"), "HOST_DIALECT": str(dialect), "HOST_POOL_SIZE": "4",
            "HOST_TIMEOUT_MS": "1500", "AUDIT_LOG_PATH": str(audit), "CARD_SERVICE_ADDR": "127.0.0.1:0"}
@@ -148,7 +148,7 @@ def multi_acquirer(tmp_path_factory, card_service_binary):
     mock_b = Process(common)
     port_b = mock_b.wait_listening(10)
     audit = d / "iso-audit.jsonl"
-    env = {**os.environ, "SIM_HSM_BDK_HEX": TEST_BDK_HEX, "HOSTS": "psp_1,psp_2",
+    env = {**os.environ, "SIM_HSM_BDK_HEX": TEST_BDK_HEX, "CARD_DATA_STORAGE": "sandbox", "HOSTS": "psp_1,psp_2",
            "PSP_1_ADDR": f"127.0.0.1:{port_a}", "PSP_2_ADDR": f"127.0.0.1:{port_b}",
            "HOST_SERVER_NAME": "localhost", "HOST_CA": str(d / "ca.pem"), "HOST_CLIENT_CERT": str(d / "client.pem"),
            "HOST_CLIENT_KEY": str(d / "client-key.pem"), "HOST_DIALECT": str(dialect), "HOST_POOL_SIZE": "2",

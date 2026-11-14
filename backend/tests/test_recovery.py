@@ -111,6 +111,24 @@ def test_2_a_request_that_died_before_the_network_is_failed_and_its_key_freed(re
     assert error["retryable"] is True
     assert statuses(db, sent) == "PENDING" and key_state(db, sent) == "IN_FLIGHT", "a sent payment keeps its key"
 
+
+def test_finished_keys_are_purged_after_the_retention_window_and_in_flight_ones_never(repo, new, db):
+    from datetime import timedelta
+
+    old_done, terminal_id = new("UPI")
+    recent_done, _ = new("UPI")
+    old_in_flight, _ = new("UPI")
+    for transaction_id in (old_done, recent_done):
+        repo.mark_pending(transaction_id, terminal_id)
+        repo.finish(transaction_id, terminal_id, MethodResult(status="SETTLED"), "SETTLED", None, store_response=True)
+    db.execute("UPDATE idempotency_keys SET created_at = now() - interval '8 days' WHERE transaction_id = ANY(%s)",
+               ([old_done, old_in_flight],))
+
+    assert repo.purge_done_keys(timedelta(days=7)) == 1
+    assert key_state(db, old_done) is None, "past the window: purged"
+    assert key_state(db, recent_done) == "DONE", "inside the window: a retry still replays"
+    assert key_state(db, old_in_flight) == "IN_FLIGHT", "the stuck-key sweep owns in-flight keys"
+
     # The stalled request wakes up after the sweep: it must not send the payment it no longer owns.
     with pytest.raises(TransactionSuperseded):
         repo.mark_pending(stuck, terminal_id)

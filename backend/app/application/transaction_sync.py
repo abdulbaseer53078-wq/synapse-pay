@@ -19,9 +19,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 from uuid import UUID
 
-from app.application.methods import MethodRegistry
+from app.application.methods import AdapterUnavailable, MethodRegistry
 from app.application.offline_sync import OfflineSignatureInvalid, verify_item
 from app.application.registration import Forbidden, RegistrationError
+from app.application.transactions import StillProcessing
 from app.domain.edge_chain import chain_hash, judge
 
 
@@ -53,8 +54,20 @@ class SyncEngine(Protocol):
     def create(self, caller_terminal: UUID, body: dict) -> dict: ...
 
 
-def _failed(reference: str, reason: str) -> dict:
-    return {"offline_reference": reference, "status": "FAILED", "reason": reason}
+# A sale's local_timestamp may run this far ahead of the cloud's clock; further ahead is refused, or a sale stamped
+# tomorrow would start an empty rolling-24h window and get a fresh daily allowance.
+MAX_CLOCK_SKEW = timedelta(minutes=5)
+
+# Refusals that did nothing and released the idempotency key: the edge must send the item again, unchanged.
+_RETRYABLE = (AdapterUnavailable, StillProcessing)
+
+
+def _failed(reference: str, reason: str, retryable: bool = False) -> dict:
+    """Spec 1.14.0: a refused item carries the spec's Error (the edge retries on `retryable`). `reason` stays for
+    clients that already read it."""
+    return {"offline_reference": reference, "status": "FAILED", "reason": reason,
+            "error": {"error_code": reason, "error_message": f"offline sale refused: {reason}",
+                      "error_category": "SYSTEM_ERROR" if retryable else "VALIDATION_ERROR", "retryable": retryable}}
 
 
 class OfflineSyncService:
@@ -173,6 +186,9 @@ class OfflineSyncService:
             accepted_at = datetime.fromisoformat(str(item["local_timestamp"]).replace("Z", "+00:00"))
         except (KeyError, ValueError):
             return _failed(reference, "OFFLINE_TIMESTAMP_INVALID")
+        # No offset: can't be compared with the cloud's clock (and would raise). In the future: see MAX_CLOCK_SKEW.
+        if accepted_at.tzinfo is None or accepted_at - now > MAX_CLOCK_SKEW:
+            return _failed(reference, "OFFLINE_TIMESTAMP_INVALID")
         if (now - accepted_at).total_seconds() > int(limits.get("max_age_minutes") or 0) * 60:
             return _failed(reference, "OFFLINE_TRANSACTION_EXPIRED")
         if "per_day" in limits:
@@ -195,6 +211,9 @@ class OfflineSyncService:
             response = self.engine.create(terminal_id, body)
         except RegistrationError as exc:
             # A rail-level refusal is this item's outcome, not the batch's.
-            return _failed(reference, exc.code)
-        return {"offline_reference": reference, "transaction_id": response["transaction_id"],
-                "status": response["status"]}
+            return _failed(reference, exc.code, retryable=isinstance(exc, _RETRYABLE))
+        result = {"offline_reference": reference, "transaction_id": response["transaction_id"],
+                  "status": response["status"]}
+        if response.get("error"):  # a decline, or a retryable failure (e.g. a reversed host timeout) to send again
+            result["error"] = response["error"]
+        return result

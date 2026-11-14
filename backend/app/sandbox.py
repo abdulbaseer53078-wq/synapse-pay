@@ -157,7 +157,7 @@ def main(argv: list[str]) -> int:
         print("Building the card service (first run takes a few minutes)...", flush=True)
         subprocess.run(["cargo", "build", "--quiet", "--bin", "card_service"], cwd=ROOT / "card-service", check=True)
         binary = ROOT / "card-service" / "target" / "debug" / ("card_service.exe" if os.name == "nt" else "card_service")
-        env = {**os.environ, "SIM_HSM_BDK_HEX": TEST_BDK_HEX, "SIM_HSM_CHECKOUT_KEY": str(WORK / "checkout-key.pem"),
+        env = {**os.environ, "SIM_HSM_BDK_HEX": TEST_BDK_HEX, "CARD_DATA_STORAGE": "sandbox", "SIM_HSM_CHECKOUT_KEY": str(WORK / "checkout-key.pem"),
                "HOST_ADDR": f"127.0.0.1:{host_port}", "HOST_SERVER_NAME": "localhost", "HOST_CA": str(WORK / "ca.pem"),
                "HOST_CLIENT_CERT": str(WORK / "client.pem"), "HOST_CLIENT_KEY": str(WORK / "client-key.pem"),
                "HOST_DIALECT": str(dialect), "AUDIT_LOG_PATH": str(WORK / "iso-audit.jsonl"),

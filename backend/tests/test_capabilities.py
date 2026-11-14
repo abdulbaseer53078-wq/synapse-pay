@@ -194,3 +194,11 @@ def test_a_terminal_reads_capabilities_over_mtls(caps_client):
     client, _ = caps_client
     r = client.get("/api/v1/capabilities/CARD", headers={"x-terminal-id": str(uuid4())})
     assert r.status_code == 200
+
+
+@pytest.mark.parametrize("value", ["", "-", "anything"])
+def test_a_header_that_is_not_a_terminal_id_needs_a_token(caps_client, value):
+    """Flaw #1: an empty value (which the ALB's `*` rule may not match) or the gateway's "-" isn't a terminal."""
+    client, _ = caps_client
+    r = client.get("/api/v1/capabilities/CARD", headers={"x-terminal-id": value})
+    assert r.status_code == 401

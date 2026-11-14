@@ -280,6 +280,55 @@ resource "aws_lb_listener" "api" {
   }
 }
 
+# Flaw #1: the backend trusts these headers as identity because Envoy sets them from a verified client certificate.
+# Envoy reaches the API over localhost, never through this ALB, so arriving here they can only be forged: refuse
+# the request. /internal/* (Envoy's ext_authz, the edge API) is likewise only for Envoy.
+locals {
+  gateway_only_headers = ["x-terminal-id", "x-edge-node-id", "x-forwarded-client-cert"]
+  gateway_only_refusal = jsonencode({
+    error_code = "FORBIDDEN", error_message = "terminal and edge identities are only accepted through the mTLS gateway",
+    error_category = "AUTHENTICATION_ERROR", retryable = false
+  })
+}
+
+resource "aws_lb_listener_rule" "refuse_gateway_headers" {
+  for_each     = { for i, header in local.gateway_only_headers : header => i }
+  listener_arn = aws_lb_listener.api.arn
+  priority     = each.value + 1
+  action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "application/json"
+      status_code  = "403"
+      message_body = local.gateway_only_refusal
+    }
+  }
+  condition {
+    http_header {
+      http_header_name = each.key
+      values           = ["*"] # present at all; the backend also ignores an empty or non-UUID value
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "refuse_internal_paths" {
+  listener_arn = aws_lb_listener.api.arn
+  priority     = length(local.gateway_only_headers) + 1
+  action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "application/json"
+      status_code  = "403"
+      message_body = local.gateway_only_refusal
+    }
+  }
+  condition {
+    path_pattern {
+      values = ["/internal/*"]
+    }
+  }
+}
+
 resource "aws_lb" "terminals" {
   name               = "${var.name}-terminals"
   load_balancer_type = "network"

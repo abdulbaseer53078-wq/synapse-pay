@@ -35,7 +35,7 @@ def scheme_host(tmp_path_factory, card_service_binary):
     sim = Process([os.environ.get("PYTHON", sys.executable), str(ROOT / "certification" / "scheme_sim.py"),
                    "--dialect", str(dialect), "--cert", str(d / "host.pem"), "--key", str(d / "host-key.pem"),
                    "--client-ca", str(d / "ca.pem"), "--evidence", str(evidence)])
-    env = {**os.environ, "SIM_HSM_BDK_HEX": TEST_BDK_HEX, "HOST_ADDR": f"127.0.0.1:{sim.wait_listening(10)}",
+    env = {**os.environ, "SIM_HSM_BDK_HEX": TEST_BDK_HEX, "CARD_DATA_STORAGE": "sandbox", "HOST_ADDR": f"127.0.0.1:{sim.wait_listening(10)}",
            "HOST_SERVER_NAME": "localhost", "HOST_CA": str(d / "ca.pem"), "HOST_CLIENT_CERT": str(d / "client.pem"),
            "HOST_CLIENT_KEY": str(d / "client-key.pem"), "HOST_DIALECT": str(dialect), "HOST_POOL_SIZE": "2",
            "HOST_TIMEOUT_MS": "1500", "AUDIT_LOG_PATH": str(d / "iso-audit.jsonl"), "CARD_SERVICE_ADDR": "127.0.0.1:0"}
