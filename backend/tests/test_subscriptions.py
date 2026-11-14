@@ -1,5 +1,6 @@
-"""SaaS subscriptions: the upgrade endpoint, the plan rules, and the offline gate on edge rules. No database: the
-repository is faked here; the Postgres repository is covered through the edge fixtures in test_edge_rules.py."""
+"""SaaS subscriptions: the upgrade endpoint, the plan rules, the offline gate on edge rules, and auto-renewal.
+No database: the repository is faked here; the Postgres repository is covered through the edge fixtures in
+test_edge_rules.py."""
 import time
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -34,6 +35,11 @@ class FakeRepo:
             raise UnknownReference("merchant not found", code="MERCHANT_NOT_FOUND")
         self.rows[subscription.merchant_id] = subscription
         self.saves.append((subscription, previous, actor_id))
+
+    def list_active_expiring(self, now, within):
+        return [s for s in self.rows.values()
+                if s.tier in {"PRO", "ENTERPRISE"} and s.status == "ACTIVE"
+                and s.current_period_end is not None and s.current_period_end <= now + within]
 
 
 def _service(repo=None):
@@ -183,3 +189,189 @@ def test_a_free_merchants_edge_gets_signed_rules_that_allow_no_offline_sale():
     assert body["offline_limits"]["per_transaction"] == 0 and body["offline_limits"]["per_day"] == 0
     assert body["subscription_required"] == "SUBSCRIPTION_REQUIRED"
     assert body["signature"], "still a valid signed rule set, so the edge installs it and keeps syncing"
+
+# --- auto-renewal (1.17.0) ---------------------------------------------------------------------------------
+
+def test_renewal_extends_active_period_from_period_end_not_from_now():
+    # Period must grow from current_period_end so late webhooks don't cause drift.
+    repo, merchant = FakeRepo(), uuid4()
+    end = NOW + timedelta(days=5)  # still active but nearly expired
+    repo.rows[merchant] = Subscription(merchant, "PRO", "ACTIVE", end, 0)
+    renewed = _service(repo).renew_subscription(merchant, "system:renewal_job")
+    assert renewed.current_period_end == end + timedelta(days=30)
+    assert renewed.renewal_count == 1
+
+
+def test_renewal_increments_renewal_count_and_audits_with_system_actor():
+    repo, merchant = FakeRepo(), uuid4()
+    repo.rows[merchant] = Subscription(merchant, "PRO", "ACTIVE", NOW + timedelta(days=5), 2)
+    _service(repo).renew_subscription(merchant, "system:renewal_job")
+    sub, _prev, actor = repo.saves[0]
+    assert sub.renewal_count == 3
+    assert actor == "system:renewal_job", "audit queries can filter automatic vs admin renewals by actor"
+
+
+def test_renewal_is_idempotent_when_more_than_one_period_remains():
+    # A second renewal webhook must not double-extend the period.
+    repo, merchant = FakeRepo(), uuid4()
+    far_future = NOW + timedelta(days=35)  # more than one PERIOD from now
+    repo.rows[merchant] = Subscription(merchant, "PRO", "ACTIVE", far_future, 1)
+    result = _service(repo).renew_subscription(merchant, "system:renewal_job")
+    assert result.current_period_end == far_future, "period unchanged"
+    assert repo.saves == [], "no audit row written for a no-op renewal"
+
+
+def test_renewal_of_enterprise_plan_preserves_tier():
+    repo, merchant = FakeRepo(), uuid4()
+    end = NOW + timedelta(days=3)
+    repo.rows[merchant] = Subscription(merchant, "ENTERPRISE", "ACTIVE", end, 0)
+    renewed = _service(repo).renew_subscription(merchant, "system:renewal_job")
+    assert renewed.tier == "ENTERPRISE"
+    assert renewed.current_period_end == end + timedelta(days=30)
+
+
+@pytest.mark.parametrize("tier,status", [
+    ("FREE", "ACTIVE"),
+    ("PRO", "PAST_DUE"),
+    ("PRO", "CANCELED"),
+])
+def test_renewal_of_ineligible_merchant_is_a_no_op(tier, status):
+    # Ineligible merchants are returned unchanged, not errored: the renewal job can safely call
+    # renew_subscription on a batch without filtering first.
+    repo, merchant = FakeRepo(), uuid4()
+    repo.rows[merchant] = Subscription(merchant, tier, status, NOW + timedelta(days=5), 0)
+    result = _service(repo).renew_subscription(merchant, "system:renewal_job")
+    assert result.tier == tier and result.status == status
+    assert repo.saves == []
+
+
+def test_renewal_of_a_free_merchant_with_no_row_is_a_no_op():
+    service, merchant = _service(), uuid4()
+    result = service.renew_subscription(merchant, "system:renewal_job")
+    assert result.tier == "FREE"
+
+
+def test_list_active_expiring_returns_only_subscriptions_due_within_window():
+    repo = FakeRepo()
+    due_soon, m1 = uuid4(), uuid4()
+    not_due, m2 = uuid4(), uuid4()
+    past_due, m3 = uuid4(), uuid4()
+    repo.rows[m1] = Subscription(m1, "PRO", "ACTIVE", NOW + timedelta(days=2), 0)
+    repo.rows[m2] = Subscription(m2, "PRO", "ACTIVE", NOW + timedelta(days=10), 0)
+    repo.rows[m3] = Subscription(m3, "PRO", "PAST_DUE", NOW + timedelta(days=2), 0)
+    expiring = repo.list_active_expiring(NOW, timedelta(days=5))
+    assert len(expiring) == 1 and expiring[0].merchant_id == m1
+
+
+# --- renewal endpoint (1.17.0) ---------------------------------------------------------------------------------
+# These tests require Worker 2 to add POST /api/v1/subscriptions/renew to the router. They will FAIL until then.
+
+@pytest.fixture
+def renewal_api():
+    key = ec.generate_private_key(ec.SECP256R1())
+    app = FastAPI()
+    app.state.jwt_public_key = key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+    repo = FakeRepo()
+    app.state.subscriptions = _service(repo)
+    errors_module.install(app)
+    app.include_router(subscriptions_api.router)
+    return TestClient(app), key, repo
+
+
+def _billing_token(key):
+    return {"Authorization": "Bearer " + jwt.encode(
+        {"sub": "billing-service", "scope": "billing:webhook", "exp": int(time.time()) + 300}, key, "ES256")}
+
+
+def test_billing_webhook_renews_an_active_pro_merchant(renewal_api):
+    client, key, repo = renewal_api
+    merchant = uuid4()
+    end = NOW + timedelta(days=5)
+    repo.rows[merchant] = Subscription(merchant, "PRO", "ACTIVE", end, 0)
+    r = client.post("/api/v1/subscriptions/renew", headers=_billing_token(key),
+                    json={"merchant_id": str(merchant)})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["tier"] == "PRO" and body["status"] == "ACTIVE"
+    assert body["renewal_count"] == 1
+    assert repo.saves[0][2] == "billing-service", "JWT subject is the audited actor"
+
+
+def test_billing_webhook_is_idempotent_for_already_current_period(renewal_api):
+    client, key, repo = renewal_api
+    merchant = uuid4()
+    repo.rows[merchant] = Subscription(merchant, "PRO", "ACTIVE", NOW + timedelta(days=35), 1)
+    r = client.post("/api/v1/subscriptions/renew", headers=_billing_token(key),
+                    json={"merchant_id": str(merchant)})
+    assert r.status_code == 200
+    assert r.json()["renewal_count"] == 1, "no additional renewal written"
+    assert repo.saves == []
+
+
+def test_billing_webhook_requires_billing_webhook_scope(renewal_api):
+    client, key, repo = renewal_api
+    merchant = uuid4()
+    repo.rows[merchant] = Subscription(merchant, "PRO", "ACTIVE", NOW + timedelta(days=5), 0)
+    admin_headers = _token(key, scope="registry:admin")
+    r = client.post("/api/v1/subscriptions/renew", headers=admin_headers,
+                    json={"merchant_id": str(merchant)})
+    assert r.status_code == 403 and repo.saves == []
+
+
+def test_billing_webhook_returns_200_unchanged_for_free_merchant(renewal_api):
+    client, key, repo = renewal_api
+    merchant = uuid4()
+    r = client.post("/api/v1/subscriptions/renew", headers=_billing_token(key),
+                    json={"merchant_id": str(merchant)})
+    assert r.status_code == 200
+    assert r.json()["tier"] == "FREE" and r.json()["renewal_count"] == 0
+
+
+def test_billing_webhook_response_includes_renewal_count(renewal_api):
+    # Ensures the view/serialization layer exposes renewal_count (spec 1.17.0 makes it required).
+    client, key, repo = renewal_api
+    merchant = uuid4()
+    repo.rows[merchant] = Subscription(merchant, "PRO", "ACTIVE", NOW + timedelta(days=5), 7)
+    r = client.post("/api/v1/subscriptions/renew", headers=_billing_token(key),
+                    json={"merchant_id": str(merchant)})
+    assert r.status_code == 200
+    assert "renewal_count" in r.json()
+
+# --- renewal sweep job (1.17.0) -------------------------------------------------------------------------
+
+from app.application.renewal_job import RENEWAL_WINDOW, sweep_renewals
+
+
+def test_sweep_renews_subscriptions_expiring_within_window():
+    repo = FakeRepo()
+    m1, m2 = uuid4(), uuid4()
+    repo.rows[m1] = Subscription(m1, "PRO", "ACTIVE", NOW + timedelta(hours=12), 0)  # due soon
+    repo.rows[m2] = Subscription(m2, "PRO", "ACTIVE", NOW + timedelta(days=20), 0)   # not due
+    service = _service(repo)
+    renewed = sweep_renewals(repo, service, now=NOW, window=RENEWAL_WINDOW)
+    assert len(renewed) == 1 and renewed[0].merchant_id == m1
+    assert repo.rows[m1].renewal_count == 1
+    assert repo.rows[m2].renewal_count == 0, "subscription not due was left alone"
+
+
+def test_sweep_skips_and_logs_on_per_merchant_error(caplog):
+    import logging
+    repo = FakeRepo()
+    m1 = uuid4()
+    # Force save() to blow up for this merchant by marking it unknown
+    repo.rows[m1] = Subscription(m1, "PRO", "ACTIVE", NOW + timedelta(hours=1), 0)
+    repo.known = set()  # any save raises UnknownReference
+    service = _service(repo)
+    with caplog.at_level(logging.ERROR, logger="app.application.renewal_job"):
+        renewed = sweep_renewals(repo, service, now=NOW)
+    assert renewed == [], "failed renewal is not returned"
+    assert any("failed to renew" in r.message for r in caplog.records)
+
+
+def test_sweep_returns_empty_when_nothing_is_due():
+    repo = FakeRepo()
+    m = uuid4()
+    repo.rows[m] = Subscription(m, "PRO", "ACTIVE", NOW + timedelta(days=25), 0)
+    assert sweep_renewals(repo, _service(repo), now=NOW) == []
+    assert repo.saves == []

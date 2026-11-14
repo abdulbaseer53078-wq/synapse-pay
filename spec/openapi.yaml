@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.16.0
+  version: 1.17.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
-    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook. 1.16.0 adds merchant subscriptions: POST /v1/subscriptions/upgrade and SUBSCRIPTION_CONFLICT.
+    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook. 1.16.0 adds merchant subscriptions: POST /v1/subscriptions/upgrade and SUBSCRIPTION_CONFLICT. 1.17.0 adds auto-renewal billing: POST /v1/subscriptions/renew (billing webhook), auto_renew field on Subscription, and RENEWAL_ALREADY_CURRENT / RENEWAL_DISABLED error codes.
 servers:
   - url: /api
 # Merchant backends use OAuth2; terminals use mTLS. Either satisfies a request.
@@ -480,6 +480,45 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /v1/subscriptions/renew:
+    post:
+      operationId: renewSubscription
+      summary: Trigger auto-renewal for a merchant (billing webhook / renewal job)
+      description: >-
+        Since 1.17.0. Called by the billing provider webhook or the internal renewal job after a
+        successful charge. Extends the merchant's paid period by 30 days from current_period_end (not
+        from now, so late webhooks do not cause period drift). Returns the subscription unchanged (200)
+        when the merchant already has more than one full period remaining — idempotent by state. Returns
+        the subscription unchanged (200) for FREE, PAST_DUE, or CANCELED merchants: the caller is
+        responsible for charging before calling this endpoint. 422 MERCHANT_NOT_FOUND for an unknown
+        merchant. Requires billing:webhook scope; not callable with merchant or admin tokens.
+        shortcut: billing_reference idempotency not yet enforced; add it once BillingProvider is wired.
+      security: [{ OAuth2ClientCredentials: [billing:webhook] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [merchant_id]
+              properties:
+                merchant_id: { type: string, format: uuid }
+                billing_reference:
+                  type: string
+                  description: >-
+                    Optional opaque reference from the billing provider (charge ID, invoice ID). Logged
+                    for auditing; not yet used for idempotency enforcement.
+      responses:
+        '200':
+          description: The merchant's subscription (renewed or already current).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
   /v1/card-tokens:
     post:
@@ -1971,7 +2010,7 @@ components:
     Subscription:
       type: object
       additionalProperties: false
-      required: [merchant_id, tier, status, current_period_end]
+      required: [merchant_id, tier, status, current_period_end, renewal_count]
       properties:
         merchant_id: { type: string, format: uuid }
         tier: { type: string, enum: [FREE, PRO, ENTERPRISE] }
@@ -1980,6 +2019,12 @@ components:
           type: [string, 'null']
           format: date-time
           description: When the paid period ends. null for the implicit FREE plan of a merchant with no subscription.
+        renewal_count:
+          type: integer
+          minimum: 0
+          description: >-
+            Since 1.17.0. Number of times the subscription has been auto-renewed. 0 for a plan that was
+            only upgraded by an admin or never renewed. Useful for auditing and diagnosing renewal loops.
     Certification:
       type: object
       additionalProperties: false
