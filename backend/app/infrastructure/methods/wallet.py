@@ -138,8 +138,14 @@ class HttpWallet:
             raise WalletSentNoAnswer("the wallet provider answered a non-JSON body; outcome unknown") from exc
 
     def status(self, wallet_transaction_id: str) -> dict:
+        return self._get_status(f"/wallet/v1/status/{wallet_transaction_id}")
+
+    def status_by_merchant_id(self, merchant_transaction_id: str) -> dict:
+        return self._get_status(f"/wallet/v1/status/merchant/{merchant_transaction_id}")
+
+    def _get_status(self, path: str) -> dict:
         try:
-            response = self.client.get(f"/wallet/v1/status/{wallet_transaction_id}")
+            response = self.client.get(path)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise WalletUnavailable(f"the wallet provider did not answer ({type(exc).__name__})") from exc
         if response.status_code >= 400:
@@ -221,9 +227,15 @@ class WalletMethodAdapter(BaseMethodAdapter):
     def status(self, transaction_id, reference: str | None = None) -> MethodResult:
         from app.application.methods import UnsupportedOperation
         if not reference:
-            raise UnsupportedOperation("WALLET status needs the provider reference stored with the transaction")
+            status_fn = getattr(self.provider, "status_by_merchant_id", None)
+            if status_fn is None:
+                raise UnsupportedOperation("WALLET status needs the provider reference stored with the transaction")
+            lookup = str(transaction_id)
+        else:
+            status_fn = self.provider.status
+            lookup = reference
         try:
-            reply = self.provider.status(reference)
+            reply = status_fn(lookup)
         except WalletDeclined as declined:
             return MethodResult(status="FAILED", error={
                 "error_code": declined.code, "error_message": declined.message,

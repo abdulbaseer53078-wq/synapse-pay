@@ -66,6 +66,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/mock/state":
             with _lock:
                 return self._send(200, {"debits": list(_debits.values())})
+        if self.path.startswith("/wallet/v1/status/merchant/"):
+            merchant_id = self.path.rsplit("/", 1)[-1]
+            with _lock:
+                record = next((r for r in _debits.values() if r.get("merchant_transaction_id") == merchant_id), None)
+            if record is None:
+                return self._error(404, "TRANSACTION_NOT_FOUND", merchant_id)
+            return self._send(200, record)
         if self.path.startswith("/wallet/v1/status/"):
             wallet_id = self.path.rsplit("/", 1)[-1]
             with _lock:

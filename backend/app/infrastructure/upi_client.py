@@ -60,6 +60,9 @@ class HttpUpiPsp:
     def status(self, psp_transaction_id: str) -> dict:
         return self._call("GET", f"/psp/v1/status/{psp_transaction_id}")
 
+    def status_by_merchant_id(self, merchant_transaction_id: str) -> dict:
+        return self._call("GET", f"/psp/v1/status/merchant/{merchant_transaction_id}")
+
     def refund(self, psp_transaction_id: str, amount: int, refund_id: str | None = None) -> dict:
         # merchant_refund_id is the PSP's idempotency key: the same id sent again returns the first answer.
         return self._call("POST", "/psp/v1/refund", {"psp_transaction_id": psp_transaction_id, "amount": amount,

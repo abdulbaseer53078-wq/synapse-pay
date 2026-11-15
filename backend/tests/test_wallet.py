@@ -168,6 +168,17 @@ def test_status_needs_the_provider_reference():
         WalletMethodAdapter(FakeWallet()).status(uuid4())
 
 
+def test_status_falls_back_to_merchant_id_when_no_reference():
+    """A wallet debit stored PENDING with no provider reference can still be polled by merchant id."""
+    class WithMerchantLookup(FakeWallet):
+        def status_by_merchant_id(self, merchant_transaction_id):
+            return {"wallet_transaction_id": "wal_recovered", "status": "SUCCESS"}
+
+    result = WalletMethodAdapter(WithMerchantLookup()).status(uuid4())
+    assert result.status == "SETTLED"
+    assert result.method_reference == "wal_recovered"
+
+
 # --- the engine routes it -------------------------------------------------------------------------------
 
 class _Repo:

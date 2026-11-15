@@ -135,9 +135,15 @@ class UpiMethodAdapter(BaseMethodAdapter):
 
     def status(self, transaction_id: UUID, reference: str | None = None) -> MethodResult:
         if not reference:
-            raise UnsupportedOperation("UPI status needs the PSP reference stored with the transaction")
+            status_fn = getattr(self.psp, "status_by_merchant_id", None)
+            if status_fn is None:
+                raise UnsupportedOperation("UPI status needs the PSP reference stored with the transaction")
+            lookup = str(transaction_id)
+        else:
+            status_fn = self.psp.status
+            lookup = reference
         try:
-            return _status_result(self.psp.status(reference))
+            return _status_result(status_fn(lookup))
         except PspDeclined as declined:
             return _failure(declined.code, declined.message, declined.category, declined.retryable)
 

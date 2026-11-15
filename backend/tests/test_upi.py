@@ -204,6 +204,18 @@ def test_status_needs_the_stored_reference():
         UpiMethodAdapter(FakePsp()).status(uuid4())
 
 
+def test_status_falls_back_to_merchant_id_when_no_reference():
+    """A transaction stored PENDING with no PSP reference (OutcomeUnknown) can still be resolved by merchant id."""
+    class WithMerchantLookup(FakePsp):
+        def status_by_merchant_id(self, merchant_transaction_id):
+            return {"psp_transaction_id": "psp_recovered", "status": "SUCCESS", "rrn": "123456789012"}
+
+    tid = uuid4()
+    result = UpiMethodAdapter(WithMerchantLookup()).status(tid)
+    assert result.status == "SETTLED"
+    assert result.method_reference == "psp_recovered"
+
+
 def test_refund_uses_the_reference():
     psp = FakePsp()
     result = UpiMethodAdapter(psp).refund(uuid4(), 500, "psp_abc")
