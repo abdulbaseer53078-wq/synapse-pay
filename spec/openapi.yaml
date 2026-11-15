@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.18.0
+  version: 1.19.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
-    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook. 1.16.0 adds merchant subscriptions: POST /v1/subscriptions/upgrade and SUBSCRIPTION_CONFLICT. 1.18.0 adds merchant experience: API key management (POST/GET/DELETE /v1/api-keys), transparent settlements (GET /v1/settlements), and risk visibility (GET /v1/risk-status).
+    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook. 1.16.0 adds merchant subscriptions: POST /v1/subscriptions/upgrade and SUBSCRIPTION_CONFLICT. 1.18.0 adds merchant experience: API key management (POST/GET/DELETE /v1/api-keys), transparent settlements (GET /v1/settlements), and risk visibility (GET /v1/risk-status). 1.19.0 adds e-commerce features: hosted Web Checkout Sessions (POST/GET /v1/checkout/sessions), POST /v1/checkout/sessions/{id}/pay (the SDK's card-submission endpoint), and GET /v1/transactions/{id}/refunds to list refunds on a transaction.
 servers:
   - url: /api
 # Merchant backends use OAuth2; terminals use mTLS. Either satisfies a request.
@@ -264,6 +264,99 @@ paths:
                   y: { type: string }
         4XX: { $ref: '#/components/responses/Error' }
         5XX: { $ref: '#/components/responses/Error' }
+
+  # ── Web Checkout Sessions (1.19.0) ─────────────────────────────────────────
+  # A merchant server creates a session; the customer's browser opens checkout_url.
+  # Synapse hosts the card form, creates a payment intent internally, and redirects to
+  # success_url (with session_id query param) or cancel_url when done.
+  /v1/checkout/sessions:
+    post:
+      operationId: createCheckoutSession
+      summary: Create a hosted checkout session
+      description: >-
+        Since 1.19.0. The response includes a checkout_url the merchant redirects the customer's
+        browser to. Synapse hosts the payment page; the merchant's server never touches card data.
+        The session expires after 30 minutes if the customer does not complete payment.
+        On completion the customer is redirected to success_url?session_id=cs_<hex>.
+        On cancellation or expiry the customer is redirected to cancel_url?session_id=cs_<hex>.
+      security: [{ HttpApiKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCheckoutSessionRequest' }
+      responses:
+        '201':
+          description: The session. Open checkout_url in the customer's browser immediately.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckoutSession' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /v1/checkout/sessions/{session_id}:
+    get:
+      operationId: getCheckoutSession
+      summary: Retrieve a checkout session
+      description: >-
+        Since 1.19.0. Poll for status after the customer is redirected back to success_url.
+        status is COMPLETED when payment succeeded, CANCELED when the customer abandoned,
+        EXPIRED when the 30-minute window passed, or PROCESSING while the payment is in flight.
+      security: [{ HttpApiKey: [] }]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckoutSession' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/checkout/sessions/{session_id}/pay:
+    post:
+      operationId: submitCheckoutPayment
+      summary: Submit card payment for a checkout session
+      description: >-
+        Since 1.19.0. Called by the Synapse JS SDK from the customer's browser.
+        Card data MUST be encrypted with RSA-OAEP SHA-256 to the key from GET /v1/checkout/key
+        before submission — the backend rejects any payload whose decrypted size or structure
+        does not match the expected card envelope. The SDK does this automatically.
+        A session may only be paid once; retrying a COMPLETED or PROCESSING session returns 409.
+        On success the session transitions to PROCESSING and the response includes the success_url
+        to redirect the customer to.
+      security: [{}]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string, description: "cs_<32 hex>" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubmitCheckoutPaymentRequest' }
+      responses:
+        '200':
+          description: Card accepted; payment in flight. Redirect the customer to success_url.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [success_url]
+                properties:
+                  success_url: { type: string, format: uri }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+
   /v1/merchants/me/recovery-stats:
     get:
       operationId: getRecoveryStats
@@ -678,6 +771,37 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
+
+  /v1/transactions/{transaction_id}/refunds:
+    get:
+      operationId: listRefunds
+      summary: List refunds on a transaction
+      description: >-
+        Since 1.19.0. Returns every refund for the given transaction, newest first.
+        PENDING refunds are included (they count against the refundable amount).
+        Returns an empty list for a transaction with no refunds; 404 only if the
+        transaction itself is not found or belongs to a different merchant.
+      security: [{ HttpApiKey: [] }]
+      parameters:
+        - name: transaction_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Refunds for the transaction.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/RefundResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
 
   # ── Transparent settlements (1.18.0) ────────────────────────────────────────
   # Derived from the double-entry ledger (migration 016 / merchant_settlements view).
@@ -2530,6 +2654,8 @@ components:
             - SUBSCRIPTION_CONFLICT
             - API_KEY_NOT_FOUND
             - RISK_HOLD_NOT_FOUND
+            - CHECKOUT_SESSION_NOT_FOUND
+            - CHECKOUT_SESSION_EXPIRED
           description: >-
             Machine-readable code. ISSUER_DECLINED (since 1.1.0) covers issuer declines without a more
             specific code; error_category says whether it's soft or hard. Values are added over time, so
@@ -2923,6 +3049,81 @@ components:
           description: >-
             The payment rail the QR resolves to; downstream routing and capability logic
             read this. Client-supplied, so the server must check it against qr_data.
+
+    # ── 1.19.0 schemas ──────────────────────────────────────────────────────────
+    CreateCheckoutSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [amount, success_url, cancel_url]
+      properties:
+        amount:
+          type: integer
+          format: int64
+          minimum: 100
+          description: Amount in minor currency units (paise for INR). Minimum ₹1.00.
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          default: INR
+        description:
+          type: string
+          maxLength: 255
+        success_url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: Browser is redirected here with ?session_id=cs_<hex> on successful payment.
+        cancel_url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: Browser is redirected here with ?session_id=cs_<hex> on cancellation or expiry.
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+          description: Up to 20 key-value pairs stored and returned as-is. Never logged.
+
+    CheckoutSession:
+      type: object
+      additionalProperties: false
+      required: [session_id, checkout_url, amount, currency, status, expires_at, created_at]
+      properties:
+        session_id:
+          type: string
+          description: "cs_<32 hex>"
+        checkout_url:
+          type: string
+          format: uri
+          description: Open this URL in the customer's browser immediately. Valid until expires_at.
+        amount:         { type: integer, format: int64 }
+        currency:       { type: string }
+        description:    { type: string, nullable: true }
+        status:
+          type: string
+          enum: [OPEN, PROCESSING, COMPLETED, EXPIRED, CANCELED]
+        intent_id:
+          type: string
+          nullable: true
+          description: "pi_<32 hex> of the payment intent created when the customer submits their card. Null until then."
+        success_url:    { type: string, format: uri }
+        cancel_url:     { type: string, format: uri }
+        metadata:       { type: object, additionalProperties: { type: string } }
+        expires_at:     { type: string, format: date-time }
+        created_at:     { type: string, format: date-time }
+
+    SubmitCheckoutPaymentRequest:
+      type: object
+      additionalProperties: false
+      required: [encrypted_card_data]
+      properties:
+        encrypted_card_data:
+          type: string
+          description: >-
+            RSA-OAEP SHA-256 ciphertext, base64-encoded, of the JSON object
+            {"pan":"<16 digits>","expiry":"YYYY-MM","cvv":"<3-4 digits>"}.
+            Encrypted to the key returned by GET /v1/checkout/key. The Synapse JS SDK
+            (synapse.js) encrypts automatically; custom integrations must do the same.
 
     # ── 1.18.0 schemas ──────────────────────────────────────────────────────────
     ApiKey:
