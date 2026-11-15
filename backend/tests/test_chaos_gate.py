@@ -176,7 +176,12 @@ def test_1_network_drop_mid_payment_settles_once(settings, healthy, ready, merch
         install()
         wifi, cellular = FaultProxy(port), FaultProxy(port)
         raw = json.dumps(body(ready, merchant, SLOW_APPROVAL)).encode()
-        first = threading.Thread(target=lambda: settle(f"http://127.0.0.1:{wifi.port}", raw, ready["terminal_id"], 3))
+        def _wifi():
+            try:
+                settle(f"http://127.0.0.1:{wifi.port}", raw, ready["terminal_id"], 3)
+            except AssertionError:
+                pass  # wifi was refused; cellular is the settlement path
+        first = threading.Thread(target=_wifi)
         first.start()
         time.sleep(0.3)  # the request has reached the API, which is waiting on the slow acquirer
         cut = time.monotonic()
