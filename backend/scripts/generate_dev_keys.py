@@ -1,164 +1,141 @@
-"""
-Generate local development keys for the Synapse backend.
+#!/usr/bin/env python3
+"""Generate dev keys for local Synapse Pay development into .sandbox/.
 
-Outputs (all in backend/ — the parent of this script's directory):
-  dev_ca.key            EC P-256 CA private key (PEM)
-  dev_ca.crt            Self-signed CA certificate (PEM)
-  dev_ca.crl            Empty but validly-signed CRL (PEM)
-  dev_jwt.key           EC P-256 JWT signing key (PEM)
-  dev_jwt_pub.pem       Corresponding public key (PEM)
-  dev_card_host.key     EC P-256 key for the mock ISO host's TLS cert (PEM)
-  dev_card_host.crt     TLS server cert for the mock host (CN/SAN=card-host-dev)
-  dev_card_client.key   EC P-256 key for card-service's mTLS client cert (PEM)
-  dev_card_client.crt   mTLS client cert card-service presents to the mock host
+Idempotent: does nothing if .sandbox/platform-ca.pem already exists.
+Run from anywhere; the repo root is inferred from this file's location.
 
-Safe to re-run: existing files are left untouched.
+Requires: cryptography   (pip install cryptography)
 """
+from __future__ import annotations
+
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+try:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+except ImportError:
+    sys.exit("Install the 'cryptography' package first:  pip install cryptography")
 
-OUT = Path(__file__).parent.parent  # backend/
+ROOT = Path(__file__).resolve().parents[2]  # …/synapse-pay/
+OUT = ROOT / ".sandbox"
 PEM = serialization.Encoding.PEM
 
-
-def _write_if_missing(path: Path, data: bytes) -> bool:
-    if path.exists():
-        print(f"  skip  {path.name}  (already exists)")
-        return False
-    path.write_bytes(data)
-    print(f"  wrote {path.name}")
-    return True
+_now = datetime.now(UTC)
+_1y = _now + timedelta(days=365)
 
 
-def generate() -> None:
-    print("Generating dev keys …")
+def _key_pem(key) -> bytes:
+    return key.private_bytes(PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
 
-    # ── CA key ────────────────────────────────────────────────────────────────
-    ca_key_path = OUT / "dev_ca.key"
-    if ca_key_path.exists():
-        print(f"  skip  dev_ca.key  (already exists)")
-        ca_key = serialization.load_pem_private_key(ca_key_path.read_bytes(), password=None)
-    else:
-        ca_key = ec.generate_private_key(ec.SECP256R1())
-        _write_if_missing(ca_key_path, ca_key.private_bytes(
-            PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
 
-    # ── CA certificate ────────────────────────────────────────────────────────
-    ca_cert_path = OUT / "dev_ca.crt"
-    if ca_cert_path.exists():
-        print(f"  skip  dev_ca.crt  (already exists)")
-        ca_cert = x509.load_pem_x509_certificate(ca_cert_path.read_bytes())
-    else:
-        now = datetime.now(UTC)
-        subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Synapse Dev CA")])
-        ca_cert = (
-            x509.CertificateBuilder()
-            .subject_name(subject)
-            .issuer_name(issuer)
-            .public_key(ca_key.public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(now)
-            .not_valid_after(now + timedelta(days=3650))
-            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-            .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
-            .sign(ca_key, hashes.SHA256())
+def _ca(name: str):
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(_now - timedelta(minutes=1))
+        .not_valid_after(_1y)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True, content_commitment=False, key_encipherment=False,
+                data_encipherment=False, key_agreement=False, key_cert_sign=True,
+                crl_sign=True, encipher_only=False, decipher_only=False,
+            ),
+            critical=True,
         )
-        _write_if_missing(ca_cert_path, ca_cert.public_bytes(PEM))
-
-    # ── CRL (empty, validly signed) ───────────────────────────────────────────
-    crl_path = OUT / "dev_ca.crl"
-    if not crl_path.exists():
-        now = datetime.now(UTC)
-        crl = (
-            x509.CertificateRevocationListBuilder()
-            .issuer_name(ca_cert.subject)
-            .last_update(now)
-            .next_update(now + timedelta(days=3650))  # long-lived: dev only
-            .sign(ca_key, hashes.SHA256())
-        )
-        _write_if_missing(crl_path, crl.public_bytes(PEM))
-    else:
-        print(f"  skip  dev_ca.crl  (already exists)")
-
-    # ── JWT key ───────────────────────────────────────────────────────────────
-    jwt_key_path = OUT / "dev_jwt.key"
-    if jwt_key_path.exists():
-        print(f"  skip  dev_jwt.key  (already exists)")
-        jwt_key = serialization.load_pem_private_key(jwt_key_path.read_bytes(), password=None)
-    else:
-        jwt_key = ec.generate_private_key(ec.SECP256R1())
-        _write_if_missing(jwt_key_path, jwt_key.private_bytes(
-            PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
-
-    _write_if_missing(
-        OUT / "dev_jwt_pub.pem",
-        jwt_key.public_key().public_bytes(PEM, serialization.PublicFormat.SubjectPublicKeyInfo),
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .sign(key, hashes.SHA256())
     )
-
-    # ── card-service ↔ mock ISO host TLS certs ───────────────────────────────
-    # Both signed by dev CA so card-service trusts the host (HOST_CA=dev_ca.crt)
-    # and the mock host trusts the card-service client cert (--client-ca dev_ca.crt).
-    _gen_leaf_cert(
-        key_path=OUT / "dev_card_host.key",
-        crt_path=OUT / "dev_card_host.crt",
-        cn="card-host-dev",
-        dns_san="card-host-dev",   # rustls verifies SANs, not CN
-        eku=ExtendedKeyUsageOID.SERVER_AUTH,
-        ca_cert=ca_cert,
-        ca_key=ca_key,
-    )
-    _gen_leaf_cert(
-        key_path=OUT / "dev_card_client.key",
-        crt_path=OUT / "dev_card_client.crt",
-        cn="card-service-dev",
-        dns_san=None,
-        eku=ExtendedKeyUsageOID.CLIENT_AUTH,
-        ca_cert=ca_cert,
-        ca_key=ca_key,
-    )
-
-    print("Done. Run .\\run_dev.ps1 to start the backend.")
+    return cert, key
 
 
-def _gen_leaf_cert(*, key_path: Path, crt_path: Path, cn: str, dns_san: str | None,
-                   eku, ca_cert, ca_key) -> None:
-    if crt_path.exists():
-        print(f"  skip  {crt_path.name}  (already exists)")
-        return
-    if key_path.exists():
-        key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
-    else:
-        key = ec.generate_private_key(ec.SECP256R1())
-        _write_if_missing(key_path, key.private_bytes(
-            PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
-    now = datetime.now(UTC)
+def _leaf(ca_cert, ca_key, name: str, usage, san=None):
+    key = ec.generate_private_key(ec.SECP256R1())
     builder = (
         x509.CertificateBuilder()
-        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)]))
         .issuer_name(ca_cert.subject)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now)
-        .not_valid_after(now + timedelta(days=3650))
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(x509.ExtendedKeyUsage([eku]), critical=False)
+        .not_valid_before(_now - timedelta(minutes=1))
+        .not_valid_after(_1y)
+        .add_extension(x509.ExtendedKeyUsage([usage]), critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False
+        )
     )
-    if dns_san:
-        builder = builder.add_extension(
-            x509.SubjectAlternativeName([x509.DNSName(dns_san)]), critical=False)
-    cert = builder.sign(ca_key, hashes.SHA256())
-    _write_if_missing(crt_path, cert.public_bytes(PEM))
+    if san is not None:
+        builder = builder.add_extension(x509.SubjectAlternativeName([san]), critical=False)
+    return builder.sign(ca_key, hashes.SHA256()), key
+
+
+def _crl(ca_cert, ca_key) -> bytes:
+    """An empty CRL signed by the CA.  FileCertificateAuthority would create one at startup if
+    it's missing, but writing it here avoids a startup-time write to the filesystem."""
+    crl = (
+        x509.CertificateRevocationListBuilder()
+        .issuer_name(ca_cert.subject)
+        .last_update(_now - timedelta(minutes=1))
+        .next_update(_now + timedelta(days=1))
+        .sign(ca_key, hashes.SHA256())
+    )
+    return crl.public_bytes(PEM)
+
+
+def main() -> None:
+    if (OUT / "platform-ca.pem").exists():
+        print(f"Keys already exist in {OUT}  (delete to regenerate)")
+        return
+
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    # --- Acquirer PKI: mock ISO 8583 host <-> card-service mTLS ---
+    acq_ca, acq_key = _ca("Mock Acquirer Sandbox CA")
+    (OUT / "ca.pem").write_bytes(acq_ca.public_bytes(PEM))
+    (OUT / "ca-key.pem").write_bytes(_key_pem(acq_key))
+
+    host_cert, host_key = _leaf(
+        acq_ca, acq_key, "localhost", ExtendedKeyUsageOID.SERVER_AUTH, x509.DNSName("localhost")
+    )
+    (OUT / "host.pem").write_bytes(host_cert.public_bytes(PEM))
+    (OUT / "host-key.pem").write_bytes(_key_pem(host_key))
+
+    client_cert, client_key = _leaf(
+        acq_ca, acq_key, "synapsepay-card-service", ExtendedKeyUsageOID.CLIENT_AUTH
+    )
+    (OUT / "client.pem").write_bytes(client_cert.public_bytes(PEM))
+    (OUT / "client-key.pem").write_bytes(_key_pem(client_key))
+
+    # Checkout key (card-service HSM uses this for checkout session tokens)
+    (OUT / "checkout-key.pem").write_bytes(_key_pem(ec.generate_private_key(ec.SECP256R1())))
+
+    # --- Platform CA: signs terminal certificates; backend uses it for mTLS gateway ---
+    plat_ca, plat_key = _ca("Synapse Pay Sandbox Terminal CA")
+    (OUT / "platform-ca.pem").write_bytes(plat_ca.public_bytes(PEM))
+    (OUT / "platform-ca-key.pem").write_bytes(_key_pem(plat_key))
+    (OUT / "platform-crl.pem").write_bytes(_crl(plat_ca, plat_key))
+
+    # --- JWT keypair: signs merchant and admin access tokens ---
+    jwt = ec.generate_private_key(ec.SECP256R1())
+    (OUT / "jwt-key.pem").write_bytes(_key_pem(jwt))
+    (OUT / "jwt-public.pem").write_bytes(
+        jwt.public_key().public_bytes(PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    )
+
+    print(f"Dev keys written to {OUT}")
+    print("  platform-ca.pem / platform-ca-key.pem  ->  CA_CERT_PATH / CA_KEY_PATH")
+    print("  platform-crl.pem                        ->  CA_CRL_PATH")
+    print("  jwt-public.pem                          ->  JWT_PUBLIC_KEY_PATH")
 
 
 if __name__ == "__main__":
-    try:
-        generate()
-    except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(1)
+    main()
