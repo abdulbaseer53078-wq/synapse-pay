@@ -3,39 +3,44 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Synapse Pay — Settlements</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <title>Settlements · Synapse Pay</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script>tailwind.config = { theme: { extend: { fontFamily: { sans: ["Inter", "system-ui", "sans-serif"] } } } };</script>
 </head>
-<body class="bg-gray-50">
+<body class="bg-slate-50 font-sans text-slate-900 antialiased">
 
-<div class="flex min-h-screen">
-  <div id="sidebar-mount"></div>
-  <main class="ml-56 flex-1 p-8">
-    <h1 class="text-2xl font-bold text-gray-900 mb-6">Settlements</h1>
+<div id="sidebar-mount"></div>
+<main class="md:ml-60">
+  <div class="mx-auto max-w-5xl px-4 py-8 md:px-10">
+    <header class="mb-6">
+      <h1 class="text-xl font-semibold tracking-tight">Settlements</h1>
+      <p class="mt-1 text-sm text-slate-500">Every batch paid to your bank account, with MDR and GST itemised.</p>
+    </header>
 
-    <div id="err-banner" class="hidden mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
-      Settlements require a <code class="font-mono">sk_live_</code> key. Sign in with your live key to view this page.
+    <div id="err-banner" class="mb-4 hidden rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+      Settlements are only visible with a <code class="font-mono">sk_live_</code> key. Sign out and sign in with your live key.
     </div>
 
-    <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+    <div class="overflow-x-auto rounded-lg border border-slate-200 bg-white">
       <table class="w-full text-sm">
-        <thead class="bg-gray-50 border-b border-gray-100">
+        <thead class="border-b border-slate-200 text-xs text-slate-500">
           <tr>
-            <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Date</th>
-            <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Currency</th>
-            <th class="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Gross</th>
-            <th class="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">MDR</th>
-            <th class="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">GST</th>
-            <th class="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Net</th>
+            <th class="px-4 py-2.5 text-left font-medium">Settled on</th>
+            <th class="px-4 py-2.5 text-left font-medium">Currency</th>
+            <th class="px-4 py-2.5 text-right font-medium">Gross</th>
+            <th class="px-4 py-2.5 text-right font-medium">MDR</th>
+            <th class="px-4 py-2.5 text-right font-medium">GST</th>
+            <th class="px-4 py-2.5 text-right font-medium">Net</th>
           </tr>
         </thead>
-        <tbody id="tbody" class="divide-y divide-gray-50">
-          <tr><td colspan="6" class="text-center py-8 text-gray-400">Loading…</td></tr>
+        <tbody id="tbody" class="divide-y divide-slate-100">
+          <tr><td colspan="6" class="px-4 py-10 text-center text-slate-400">Loading…</td></tr>
         </tbody>
       </table>
     </div>
-  </main>
-</div>
+  </div>
+</main>
 
 <script src="_nav.js"></script>
 <script>
@@ -48,24 +53,25 @@
 
     if (!res || !res.ok) {
       document.getElementById("err-banner").classList.remove("hidden");
-      tbody.innerHTML = `<tr><td colspan="6" class="text-center py-8 text-gray-400">No data available.</td></tr>`;
+      tbody.innerHTML = emptyRow(6, "settlements", "Settlements unavailable", "Your current key can't read settlement data.");
       return;
     }
 
     const { items } = await res.json();
     if (!items.length) {
-      tbody.innerHTML = `<tr><td colspan="6" class="text-center py-8 text-gray-400">No settlements yet.</td></tr>`;
+      tbody.innerHTML = emptyRow(6, "settlements", "No settlements yet",
+        "Captured payments are batched and settled daily. Your first payout will appear here.");
       return;
     }
 
     tbody.innerHTML = items.map(s => `
-      <tr class="hover:bg-gray-50">
-        <td class="px-4 py-3 text-gray-700">${new Date(s.settled_at).toLocaleDateString("en-IN")}</td>
-        <td class="px-4 py-3 text-gray-700">${s.currency}</td>
-        <td class="px-4 py-3 text-right text-gray-900 font-mono">${fmt(s.gross_amount, s.currency)}</td>
-        <td class="px-4 py-3 text-right text-gray-500 font-mono">${fmt(s.mdr_fee, s.currency)}</td>
-        <td class="px-4 py-3 text-right text-gray-500 font-mono">${fmt(s.gst_on_fee, s.currency)}</td>
-        <td class="px-4 py-3 text-right text-green-700 font-mono font-medium">${fmt(s.net_amount, s.currency)}</td>
+      <tr class="hover:bg-slate-50">
+        <td class="whitespace-nowrap px-4 py-3 text-slate-700">${fmtDate(s.settled_at)}</td>
+        <td class="px-4 py-3 text-slate-500">${esc(s.currency)}</td>
+        <td class="px-4 py-3 text-right tabular-nums">${fmt(s.gross_amount, s.currency)}</td>
+        <td class="px-4 py-3 text-right tabular-nums text-slate-500">${fmt(s.mdr_fee, s.currency)}</td>
+        <td class="px-4 py-3 text-right tabular-nums text-slate-500">${fmt(s.gst_on_fee, s.currency)}</td>
+        <td class="px-4 py-3 text-right font-medium tabular-nums">${fmt(s.net_amount, s.currency)}</td>
       </tr>`).join("");
   }
 

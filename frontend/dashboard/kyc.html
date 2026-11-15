@@ -3,61 +3,47 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Synapse Pay — KYC</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    .banner { display: none; }
-    .banner.show { display: block; }
-  </style>
+  <title>Business verification · Synapse Pay</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script>tailwind.config = { theme: { extend: { fontFamily: { sans: ["Inter", "system-ui", "sans-serif"] } } } };</script>
 </head>
-<body class="bg-gray-50">
+<body class="bg-slate-50 font-sans text-slate-900 antialiased">
 
-<div class="flex min-h-screen">
-  <div id="sidebar-mount"></div>
-  <main class="ml-56 flex-1 p-8">
-    <h1 class="text-2xl font-bold text-gray-900 mb-6">KYC Verification</h1>
+<div id="sidebar-mount"></div>
+<main class="md:ml-60">
+  <div class="mx-auto max-w-5xl px-4 py-8 md:px-10">
+    <header class="mb-6">
+      <h1 class="text-xl font-semibold tracking-tight">Business verification</h1>
+      <p class="mt-1 text-sm text-slate-500">We verify your PAN and GSTIN before you can accept live payments.</p>
+    </header>
 
-    <!-- Status banners -->
-    <div id="banner-kyc-required" class="banner mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
-      KYC not submitted — you can use <code class="font-mono">sk_test_</code> keys but cannot generate
-      <code class="font-mono">sk_live_</code> keys until your submission is reviewed.
-    </div>
-    <div id="banner-approved" class="banner mb-4 p-4 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
-      KYC approved — you can generate live API keys from the API Keys page.
-    </div>
-    <div id="banner-pending" class="banner mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
-      KYC under review — we will update your status within 24 hours.
-    </div>
-    <div id="banner-rejected" class="banner mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
-      KYC rejected — please correct your details and resubmit.
-    </div>
+    <div id="banner" class="mb-4 hidden max-w-lg rounded-md border px-4 py-3 text-sm"></div>
 
-    <div class="bg-white rounded-xl shadow-sm border border-gray-100 p-6 max-w-md">
-      <p class="text-sm text-gray-500 mb-6">Submit your PAN and GST details to unlock live API key generation.</p>
-
-      <form id="kyc-form" class="space-y-4">
+    <div class="max-w-lg rounded-lg border border-slate-200 bg-white p-6">
+      <form id="kyc-form" class="space-y-5">
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1.5">PAN Number</label>
-          <input type="text" id="pan" placeholder="ABCDE1234F" maxlength="10"
-                 class="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm font-mono uppercase outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" required>
-          <p class="text-xs text-gray-400 mt-1">5 letters, 4 digits, 1 letter — e.g. ABCDE1234F</p>
+          <label for="pan" class="mb-1.5 block text-sm font-medium text-slate-700">PAN</label>
+          <input type="text" id="pan" placeholder="AAACA1234Q" maxlength="10" required
+                 class="w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-sm uppercase outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-600/20">
+          <p class="mt-1 text-xs text-slate-500">10 characters: 5 letters, 4 digits, 1 letter.</p>
         </div>
         <div>
-          <label class="block text-sm font-medium text-gray-700 mb-1.5">GST Number</label>
-          <input type="text" id="gst" placeholder="29ABCDE1234F1Z5" maxlength="15"
-                 class="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm font-mono uppercase outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500" required>
-          <p class="text-xs text-gray-400 mt-1">15-character GSTIN — e.g. 29ABCDE1234F1Z5</p>
+          <label for="gst" class="mb-1.5 block text-sm font-medium text-slate-700">GSTIN</label>
+          <input type="text" id="gst" placeholder="29AAACA1234Q1Z5" maxlength="15" required
+                 class="w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-sm uppercase outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-600/20">
+          <p class="mt-1 text-xs text-slate-500">15 characters, starting with your state code.</p>
         </div>
         <button type="submit"
-                class="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white font-medium py-2.5 rounded-lg text-sm transition-colors">
-          Submit for Review
+                class="w-full rounded-md bg-blue-600 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">
+          Submit for review
         </button>
       </form>
 
-      <p id="msg" class="mt-3 text-sm text-gray-500 min-h-5"></p>
+      <p id="msg" class="mt-3 min-h-5 text-sm text-slate-500" role="status"></p>
     </div>
-  </main>
-</div>
+  </div>
+</main>
 
 <script src="_nav.js"></script>
 <script>
@@ -69,13 +55,18 @@
     el.addEventListener("input", () => { el.value = el.value.toUpperCase(); });
   });
 
+  const BANNERS = {
+    APPROVED: ["border-emerald-200 bg-emerald-50 text-emerald-800", "Verified. You can create live API keys."],
+    PENDING: ["border-blue-200 bg-blue-50 text-blue-800", "Under review. We usually respond within one business day."],
+    REJECTED: ["border-red-200 bg-red-50 text-red-800", "We couldn't verify these details. Check them and resubmit."],
+    NONE: ["border-amber-200 bg-amber-50 text-amber-800", "Not submitted yet. Test keys work now; live keys unlock after verification."],
+  };
+
   function showBanner(status) {
-    ["kyc-required", "approved", "pending", "rejected"].forEach(id => {
-      document.getElementById("banner-" + id).classList.remove("show");
-    });
-    const map = { APPROVED: "approved", PENDING: "pending", REJECTED: "rejected" };
-    const id = "banner-" + (map[status] || "kyc-required");
-    document.getElementById(id).classList.add("show");
+    const [cls, text] = BANNERS[status] || BANNERS.NONE;
+    const el = document.getElementById("banner");
+    el.className = `mb-4 max-w-lg rounded-md border px-4 py-3 text-sm ${cls}`;
+    el.textContent = text;
   }
 
   async function loadStatus() {
@@ -102,13 +93,13 @@
     });
 
     if (!res) {
-      msg.textContent = "Network error — is the backend running?";
+      msg.textContent = "Can't reach the server.";
     } else if (res.ok) {
-      msg.textContent = "Submitted — status: PENDING";
+      msg.textContent = "";
       showBanner("PENDING");
     } else {
       const data = await res.json().catch(() => ({}));
-      msg.textContent = "Error: " + (data.error_message || res.status);
+      msg.textContent = data.error_message || `Submission failed (${res.status}).`;
     }
     btn.disabled = false;
   });

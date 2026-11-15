@@ -76,10 +76,6 @@ class CertificationMatrix:
         with self._lock:
             self._snapshot = fresh
 
-    @property
-    def loaded(self) -> bool:
-        return self._snapshot is not None
-
     def denial(self, device_model: str, firmware: str | None, method: str | None = None,
                card_network: str | None = None) -> str | None:
         """FIRMWARE_UNCERTIFIED, CERTIFICATION_EXPIRED or None. With no method: certified for any scheme."""
@@ -89,9 +85,6 @@ class CertificationMatrix:
         schemes = schemes_for(method, card_network) if method else None
         return firmware_denial(snap.rows.get((device_model, firmware), []), snap.minimums.get(device_model),
                                firmware, schemes, self.now())
-
-    def is_certified(self, device_model: str, firmware_version: str) -> bool:
-        return self.denial(device_model, firmware_version) is None
 
     def is_downgrade(self, device_model: str, firmware_version: str) -> bool:
         snap = self._snapshot
