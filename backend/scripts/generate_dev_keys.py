@@ -2,11 +2,15 @@
 Generate local development keys for the Synapse backend.
 
 Outputs (all in backend/ — the parent of this script's directory):
-  dev_ca.key        EC P-256 private key for the dev CA (PEM)
-  dev_ca.crt        Self-signed CA certificate (PEM)
-  dev_ca.crl        Empty but validly-signed CRL (PEM)
-  dev_jwt.key       EC P-256 private key for JWT signing (PEM)
-  dev_jwt_pub.pem   Corresponding public key (PEM, SubjectPublicKeyInfo)
+  dev_ca.key            EC P-256 CA private key (PEM)
+  dev_ca.crt            Self-signed CA certificate (PEM)
+  dev_ca.crl            Empty but validly-signed CRL (PEM)
+  dev_jwt.key           EC P-256 JWT signing key (PEM)
+  dev_jwt_pub.pem       Corresponding public key (PEM)
+  dev_card_host.key     EC P-256 key for the mock ISO host's TLS cert (PEM)
+  dev_card_host.crt     TLS server cert for the mock host (CN/SAN=card-host-dev)
+  dev_card_client.key   EC P-256 key for card-service's mTLS client cert (PEM)
+  dev_card_client.crt   mTLS client cert card-service presents to the mock host
 
 Safe to re-run: existing files are left untouched.
 """
@@ -17,7 +21,7 @@ from pathlib import Path
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 OUT = Path(__file__).parent.parent  # backend/
 PEM = serialization.Encoding.PEM
@@ -97,7 +101,59 @@ def generate() -> None:
         jwt_key.public_key().public_bytes(PEM, serialization.PublicFormat.SubjectPublicKeyInfo),
     )
 
-    print("Done. Run run_dev.ps1 to start the backend.")
+    # ── card-service ↔ mock ISO host TLS certs ───────────────────────────────
+    # Both signed by dev CA so card-service trusts the host (HOST_CA=dev_ca.crt)
+    # and the mock host trusts the card-service client cert (--client-ca dev_ca.crt).
+    _gen_leaf_cert(
+        key_path=OUT / "dev_card_host.key",
+        crt_path=OUT / "dev_card_host.crt",
+        cn="card-host-dev",
+        dns_san="card-host-dev",   # rustls verifies SANs, not CN
+        eku=ExtendedKeyUsageOID.SERVER_AUTH,
+        ca_cert=ca_cert,
+        ca_key=ca_key,
+    )
+    _gen_leaf_cert(
+        key_path=OUT / "dev_card_client.key",
+        crt_path=OUT / "dev_card_client.crt",
+        cn="card-service-dev",
+        dns_san=None,
+        eku=ExtendedKeyUsageOID.CLIENT_AUTH,
+        ca_cert=ca_cert,
+        ca_key=ca_key,
+    )
+
+    print("Done. Run .\\run_dev.ps1 to start the backend.")
+
+
+def _gen_leaf_cert(*, key_path: Path, crt_path: Path, cn: str, dns_san: str | None,
+                   eku, ca_cert, ca_key) -> None:
+    if crt_path.exists():
+        print(f"  skip  {crt_path.name}  (already exists)")
+        return
+    if key_path.exists():
+        key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+    else:
+        key = ec.generate_private_key(ec.SECP256R1())
+        _write_if_missing(key_path, key.private_bytes(
+            PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
+    now = datetime.now(UTC)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
+        .issuer_name(ca_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.ExtendedKeyUsage([eku]), critical=False)
+    )
+    if dns_san:
+        builder = builder.add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(dns_san)]), critical=False)
+    cert = builder.sign(ca_key, hashes.SHA256())
+    _write_if_missing(crt_path, cert.public_bytes(PEM))
 
 
 if __name__ == "__main__":

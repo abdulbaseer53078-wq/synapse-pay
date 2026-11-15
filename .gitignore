@@ -8,6 +8,7 @@ target/
 dev_*.pem
 dev_*.crt
 dev_*.crl
+card-service-audit.jsonl
 graphify-out/
 .sandbox/
 node_modules/
