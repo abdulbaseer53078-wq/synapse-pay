@@ -21,10 +21,10 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.application.methods import (AdapterUnavailable, CapabilityDescriptor, DisputeRules, InvalidMethodDetails,
-                                     MethodRequest, MethodResult, Transition, UnsupportedOperation, WebhookRejected,
-                                     WebhookRequest, WebhookUpdate)
+                                     MethodRequest, MethodResult, OutcomeUnknown, Transition, UnsupportedOperation,
+                                     WebhookRejected, WebhookRequest, WebhookUpdate)
 from app.infrastructure.methods.base import BaseMethodAdapter
-from app.infrastructure.upi_client import PspDeclined, PspUnavailable
+from app.infrastructure.upi_client import PspDeclined, PspSentNoAnswer, PspUnavailable
 
 REPLAY_WINDOW_SECONDS = 300
 
@@ -95,7 +95,10 @@ class UpiMethodAdapter(BaseMethodAdapter):
     method = "UPI"
     CAPABILITIES = UPI_CAPABILITIES
     DETAILS = UpiDetails
-    ERROR_MAP = {PspUnavailable: lambda exc: AdapterUnavailable(exc.message)}
+    ERROR_MAP = {
+        PspUnavailable: lambda exc: AdapterUnavailable(exc.message),
+        PspSentNoAnswer: lambda exc: OutcomeUnknown(exc.message),
+    }
 
     def __init__(self, psp: UpiPsp, webhook_secret: str | None = None, clock=time.time,
                  replay_window: int = REPLAY_WINDOW_SECONDS):

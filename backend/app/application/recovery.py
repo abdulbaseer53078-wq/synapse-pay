@@ -17,7 +17,7 @@ import logging
 from typing import Protocol
 from uuid import UUID
 
-from app.application.methods import MethodResult, PaymentMethodAdapter
+from app.application.methods import MethodResult, PaymentMethodAdapter, UnsupportedOperation
 from app.application.transactions import TransactionRepository, apply_method_result, system_error
 
 log = logging.getLogger(__name__)
@@ -44,9 +44,22 @@ def sweep_async_pending(repo: RecoveryRepository, sweeps: list[tuple[str, Paymen
     for method, adapter in sweeps:
         for transaction_id, terminal_id, reference in repo.stale_pending(method, older_than_seconds):
             polled += 1
-            result = adapter.status(transaction_id, reference)
+            try:
+                result = adapter.status(transaction_id, reference)
+            except UnsupportedOperation:
+                log.warning("cannot poll %s/%s: no provider reference; needs manual reconciliation",
+                            method, transaction_id)
+                continue
+            except Exception as exc:
+                log.error("status inquiry failed for %s/%s: %s: %s; transaction left PENDING",
+                          method, transaction_id, type(exc).__name__, exc)
+                continue
             if result.status != "PENDING":
-                apply_method_result(repo, transaction_id, terminal_id, result)
+                try:
+                    apply_method_result(repo, transaction_id, terminal_id, result)
+                except Exception as exc:
+                    log.error("apply_method_result failed for %s/%s: %s: %s; retrying next sweep",
+                              method, transaction_id, type(exc).__name__, exc)
     return polled
 
 

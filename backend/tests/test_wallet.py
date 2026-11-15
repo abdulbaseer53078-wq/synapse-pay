@@ -10,7 +10,7 @@ import pytest
 from app.application.methods import InvalidMethodDetails, MethodRegistry, UnsupportedOperation
 from app.application.transactions import Claim, TransactionService
 from app.infrastructure.methods.wallet import (WALLET_CAPABILITIES, HttpWallet, WalletDeclined, WalletMethodAdapter,
-                                               WalletUnavailable)
+                                               WalletSentNoAnswer, WalletUnavailable)
 
 ROOT = Path(__file__).parents[2]
 TERMINAL, MERCHANT = uuid4(), uuid4()
@@ -111,6 +111,56 @@ def test_a_transport_failure_is_retryable_and_never_a_decline():
     from app.application.methods import AdapterUnavailable
     with pytest.raises(AdapterUnavailable):
         WalletMethodAdapter(Down()).initiate(_request())
+
+
+def test_connect_timeout_on_debit_frees_the_key():
+    """WalletUnavailable (connect-side) = not sent; the idempotency key is safe to free."""
+    class ConnectDown(FakeWallet):
+        def debit(self, **_kwargs):
+            raise WalletUnavailable("the wallet provider did not answer (ConnectTimeout); nothing was charged")
+
+    from app.application.methods import AdapterUnavailable
+    with pytest.raises(AdapterUnavailable):
+        WalletMethodAdapter(ConnectDown()).initiate(_request())
+
+
+def test_read_timeout_on_debit_is_outcome_unknown():
+    """WalletSentNoAnswer (read-side): the wallet may have moved money; the key must be held."""
+    class ReadDown(FakeWallet):
+        def debit(self, **_kwargs):
+            raise WalletSentNoAnswer("the wallet provider did not answer (ReadTimeout); outcome unknown")
+
+    from app.application.methods import OutcomeUnknown
+    with pytest.raises(OutcomeUnknown):
+        WalletMethodAdapter(ReadDown()).initiate(_request())
+
+
+def test_wallet_5xx_on_debit_is_outcome_unknown():
+    """A 5xx on a tokenised debit POST: the wallet may have debited; must not free the key."""
+    class ServerError(FakeWallet):
+        def debit(self, **_kwargs):
+            raise WalletSentNoAnswer("the wallet provider answered 503; outcome unknown")
+
+    from app.application.methods import OutcomeUnknown
+    with pytest.raises(OutcomeUnknown):
+        WalletMethodAdapter(ServerError()).initiate(_request())
+
+
+def test_engine_holds_key_on_wallet_outcome_unknown():
+    """The engine must mark the transaction PENDING (key held) when wallet outcome is unknown."""
+    class ReadDown(FakeWallet):
+        def debit(self, **_kwargs):
+            raise WalletSentNoAnswer("the wallet provider did not answer (ReadTimeout); outcome unknown")
+
+    repo = _Repo()
+    service = TransactionService(repo, _Auth(), MethodRegistry([WalletMethodAdapter(ReadDown())]))
+    body = {"idempotency_key": str(uuid4()), "amount": 5000, "currency": "INR", "payment_method": "WALLET",
+            "method_details": dict(DETAILS), "terminal_id": str(TERMINAL), "merchant_id": str(MERCHANT)}
+
+    response = service.create(TERMINAL, body)
+
+    assert response["status"] == "PENDING"
+    assert repo.finished[0]["stored"] is True, "key must be held: a retry must not debit twice"
 
 
 def test_status_needs_the_provider_reference():

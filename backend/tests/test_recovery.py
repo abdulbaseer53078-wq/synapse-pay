@@ -163,6 +163,93 @@ def test_3_a_stuck_card_payment_resolves_once_its_reversal_lands(repo, new, db):
                       (reversed_,)).fetchone()[0] == 0
 
 
+# --- per-item isolation (unit, no DB) -------------------------------------------------------------------
+
+class _FakeAdapter:
+    """Minimal adapter whose status() behaviour is controlled per-call."""
+
+    def __init__(self, responses: dict):
+        self.responses = responses  # transaction_id -> Exception | MethodResult
+        self.called = []
+
+    def status(self, transaction_id, reference):
+        self.called.append(transaction_id)
+        answer = self.responses.get(transaction_id, MethodResult(status="PENDING"))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+class _FakeRepo:
+    """Fake repo for sweep_async_pending unit tests (no DB needed)."""
+
+    def __init__(self, rows, fail_apply_for=None):
+        self.rows = rows  # list of (transaction_id, terminal_id, reference)
+        self.fail_apply_for = fail_apply_for or set()
+        self.applied = []
+
+    def stale_pending(self, method, older_than_seconds, limit=50):
+        return self.rows
+
+    def finish(self, transaction_id, terminal_id, result, status, error, store_response, expected=None):
+        if transaction_id in self.fail_apply_for:
+            raise RuntimeError("simulated DB error")
+        self.applied.append(transaction_id)
+        return {}
+
+    def mark_pending(self, transaction_id, terminal_id):
+        pass
+
+
+def test_sweep_continues_after_one_status_inquiry_fails():
+    """A PspUnavailable on item 1 must not prevent item 2 from being processed."""
+    t1, t2 = uuid4(), uuid4()
+    rows = [(t1, uuid4(), "psp_1"), (t2, uuid4(), "psp_2")]
+    repo = _FakeRepo(rows)
+    adapter = _FakeAdapter({
+        t1: RuntimeError("PSP down"),
+        t2: MethodResult(status="SETTLED", method_reference="psp_2"),
+    })
+
+    polled = sweep_async_pending(repo, [("UPI", adapter)], older_than_seconds=0)
+
+    assert polled == 2
+    assert adapter.called == [t1, t2], "both items were attempted"
+    assert repo.applied == [t2], "settled item was applied despite the earlier failure"
+
+
+def test_sweep_continues_after_apply_method_result_fails():
+    """A DB error applying item 1 must not prevent item 2 from being processed."""
+    t1, t2 = uuid4(), uuid4()
+    rows = [(t1, uuid4(), "psp_1"), (t2, uuid4(), "psp_2")]
+    repo = _FakeRepo(rows, fail_apply_for={t1})
+    adapter = _FakeAdapter({
+        t1: MethodResult(status="SETTLED", method_reference="psp_1"),
+        t2: MethodResult(status="SETTLED", method_reference="psp_2"),
+    })
+
+    sweep_async_pending(repo, [("UPI", adapter)], older_than_seconds=0)
+
+    assert repo.applied == [t2], "item 2 applied even though item 1 raised a DB error"
+
+
+def test_sweep_continues_after_unsupported_operation():
+    """A null reference (UnsupportedOperation) must not abort the sweep."""
+    from app.application.methods import UnsupportedOperation
+    t1, t2 = uuid4(), uuid4()
+    rows = [(t1, uuid4(), None), (t2, uuid4(), "psp_2")]
+    repo = _FakeRepo(rows)
+    adapter = _FakeAdapter({
+        t1: UnsupportedOperation("UPI status needs the PSP reference stored with the transaction"),
+        t2: MethodResult(status="SETTLED", method_reference="psp_2"),
+    })
+
+    polled = sweep_async_pending(repo, [("UPI", adapter)], older_than_seconds=0)
+
+    assert polled == 2
+    assert repo.applied == [t2]
+
+
 class ApprovingPsp:
     """The PSP's status endpoint says the collect succeeded: the webhook that should have said so was lost."""
 

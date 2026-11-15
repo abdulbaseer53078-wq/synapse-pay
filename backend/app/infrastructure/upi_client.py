@@ -1,9 +1,12 @@
 """HTTP client for a UPI PSP. `mock-psp/mock_psp.py` speaks the same shapes locally.
 
-Two failure kinds, and the distinction is the whole point:
+Three failure kinds; the distinction is the whole point:
 
-* `PspUnavailable` — we could not ask (transport, timeout, 5xx). Nothing is known, so the transaction must not
-  be marked failed; it is retryable and the outcome may still arrive by webhook.
+* `PspUnavailable` — connect-side failure (ConnectTimeout, PoolTimeout, ConnectError). Nothing was sent, so
+  the idempotency key may be freed and the client may retry.
+* `PspSentNoAnswer` — the request reached the network but no response came back (ReadTimeout, WriteTimeout,
+  other TransportError, or a 5xx/non-JSON body on a POST). The PSP may have processed the payment; the key
+  must be held until the outcome is confirmed.
 * `PspDeclined` — the PSP answered and refused (4xx). That is an outcome with a code and a category, so it
   becomes a FAILED transaction, not an exception the engine has to interpret.
 """
@@ -14,6 +17,14 @@ DEFAULT_TIMEOUT = httpx.Timeout(10.0, connect=1.0)
 
 class PspUnavailable(Exception):
     def __init__(self, message: str = "the UPI PSP is unavailable; nothing was sent"):
+        super().__init__(message)
+        self.message = message
+
+
+class PspSentNoAnswer(Exception):
+    """The request was sent but the PSP did not answer; the payment outcome is unknown."""
+
+    def __init__(self, message: str = "the UPI PSP did not answer; outcome unknown"):
         super().__init__(message)
         self.message = message
 
@@ -57,15 +68,22 @@ class HttpUpiPsp:
     def _call(self, method: str, path: str, body: dict | None = None) -> dict:
         try:
             response = self.client.request(method, path, json=body)
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
+        except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError) as exc:
             raise PspUnavailable(f"the UPI PSP did not answer ({type(exc).__name__}); nothing was sent") from exc
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            # Read/write timeout or transport error after connect: the request reached the network.
+            raise PspSentNoAnswer(f"the UPI PSP did not answer ({type(exc).__name__}); outcome unknown") from exc
         if response.status_code >= 500:
+            if method == "POST":
+                raise PspSentNoAnswer(f"the UPI PSP answered {response.status_code}; outcome unknown")
             raise PspUnavailable(f"the UPI PSP answered {response.status_code}; nothing was confirmed")
         if response.status_code >= 400:
             raise self._declined(response)
         try:
             return response.json()
         except ValueError as exc:
+            if method == "POST":
+                raise PspSentNoAnswer("the UPI PSP answered a non-JSON body; outcome unknown") from exc
             raise PspUnavailable("the UPI PSP answered something that is not JSON") from exc
 
     @staticmethod
