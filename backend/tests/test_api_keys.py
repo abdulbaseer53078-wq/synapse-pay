@@ -16,6 +16,12 @@ from app.api.auth import merchant_from_api_key
 MERCHANT = uuid4()
 
 
+class FakeKyc:
+    """Stub: always returns APPROVED for the test merchant."""
+    def status_for(self, merchant_id: UUID) -> str:
+        return "APPROVED"
+
+
 class FakeApiKeys:
     """In-memory stand-in; same interface as PostgresApiKeys."""
 
@@ -67,6 +73,7 @@ def app_and_key():
     errors_module.install(app)
     app.include_router(api_keys_api.router)
     app.state.api_keys = fake
+    app.state.kyc = FakeKyc()
 
     # override merchant_from_api_key to authenticate the seed key as MERCHANT
     app.dependency_overrides[merchant_from_api_key] = lambda: MERCHANT

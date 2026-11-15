@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.19.0
+  version: 1.20.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
-    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook. 1.16.0 adds merchant subscriptions: POST /v1/subscriptions/upgrade and SUBSCRIPTION_CONFLICT. 1.18.0 adds merchant experience: API key management (POST/GET/DELETE /v1/api-keys), transparent settlements (GET /v1/settlements), and risk visibility (GET /v1/risk-status). 1.19.0 adds e-commerce features: hosted Web Checkout Sessions (POST/GET /v1/checkout/sessions), POST /v1/checkout/sessions/{id}/pay (the SDK's card-submission endpoint), and GET /v1/transactions/{id}/refunds to list refunds on a transaction.
+    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook. 1.16.0 adds merchant subscriptions: POST /v1/subscriptions/upgrade and SUBSCRIPTION_CONFLICT. 1.18.0 adds merchant experience: API key management (POST/GET/DELETE /v1/api-keys), transparent settlements (GET /v1/settlements), and risk visibility (GET /v1/risk-status). 1.19.0 adds e-commerce features: hosted Web Checkout Sessions (POST/GET /v1/checkout/sessions), POST /v1/checkout/sessions/{id}/pay (the SDK's card-submission endpoint), and GET /v1/transactions/{id}/refunds to list refunds on a transaction. 1.20.0 adds merchant KYC: POST /v1/kyc/submit and GET /v1/kyc/status; live key creation is now gated on APPROVED KYC status.
 servers:
   - url: /api
 # Merchant backends use OAuth2; terminals use mTLS. Either satisfies a request.
@@ -615,6 +615,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ApiKeyCreated' }
+        '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
   /v1/api-keys/{key_id}:
     delete:
@@ -634,6 +635,62 @@ paths:
         '204': { description: Key revoked. }
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
+
+  # ── Merchant KYC (1.20.0) ────────────────────────────────────────────────────
+  /v1/kyc/submit:
+    post:
+      operationId: submitKyc
+      summary: Submit KYC documents
+      description: >-
+        Since 1.20.0. Submits PAN and GST numbers for verification. Status transitions
+        to PENDING immediately; poll GET /v1/kyc/status to check progress. Live-key
+        creation (POST /v1/api-keys) is gated on APPROVED status.
+      security: [{ HttpApiKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [pan_number, gst_number]
+              properties:
+                pan_number:
+                  type: string
+                  pattern: '^[A-Z]{5}[0-9]{4}[A-Z]$'
+                  description: "10-character Permanent Account Number."
+                gst_number:
+                  type: string
+                  pattern: '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$'
+                  description: "15-character GST Identification Number."
+      responses:
+        '202': { description: Submission accepted; KYC status is now PENDING. }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /v1/kyc/status:
+    get:
+      operationId: getKycStatus
+      summary: Get KYC verification status
+      description: >-
+        Since 1.20.0. Returns the merchant's current KYC status.
+        NOT_SUBMITTED until the first submission, PENDING during review,
+        APPROVED once cleared, or REJECTED.
+      security: [{ HttpApiKey: [] }]
+      responses:
+        '200':
+          description: Current KYC status.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [NOT_SUBMITTED, PENDING, APPROVED, REJECTED]
+        '401': { $ref: '#/components/responses/Error' }
 
   /v1/card-tokens:
     post:
@@ -1799,6 +1856,11 @@ components:
             audit:read: Read the append-only audit log (support, compliance and dispute tooling)
     # Merchant server → cloud with a secret API key (1.3.0): Authorization: Bearer sk_test_...
     SecretKey:
+      type: http
+      scheme: bearer
+      bearerFormat: sk_test_... / sk_live_...
+    # Merchant dashboard / self-service (1.18.0): same Bearer format, test or live key accepted.
+    HttpApiKey:
       type: http
       scheme: bearer
       bearerFormat: sk_test_... / sk_live_...
