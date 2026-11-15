@@ -40,6 +40,52 @@ class PostgresCheckoutSessions:
             "created_at": created_at.isoformat(),
         }
 
+    def get_for_pay(self, session_id_str: str) -> dict | None:
+        """Unauthenticated lookup for the /pay endpoint — session_id is the customer's auth."""
+        try:
+            session_id = UUID(session_id_str.removeprefix("cs_"))
+        except ValueError:
+            return None
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT session_id, merchant_id, amount, currency, status, expires_at, success_url, cancel_url"
+                " FROM checkout_sessions WHERE session_id = %s",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        sid, merchant_id, amount, currency, status, expires_at, success_url, cancel_url = row
+        return {"session_id": f"cs_{sid.hex}", "merchant_id": merchant_id,
+                "amount": amount, "currency": currency, "status": status,
+                "expires_at": expires_at, "success_url": success_url, "cancel_url": cancel_url}
+
+    def begin_pay(self, session_id_str: str) -> bool:
+        """OPEN → PROCESSING atomically; returns False if not OPEN or already expired."""
+        try:
+            session_id = UUID(session_id_str.removeprefix("cs_"))
+        except ValueError:
+            return False
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "UPDATE checkout_sessions SET status = 'PROCESSING', updated_at = now()"
+                " WHERE session_id = %s AND status = 'OPEN' AND expires_at > now() RETURNING session_id",
+                (session_id,),
+            ).fetchone()
+        return row is not None
+
+    def complete(self, session_id_str: str) -> None:
+        session_id = UUID(session_id_str.removeprefix("cs_"))
+        with self.pool.connection() as conn:
+            conn.execute("UPDATE checkout_sessions SET status = 'COMPLETED', updated_at = now()"
+                         " WHERE session_id = %s", (session_id,))
+
+    def reopen(self, session_id_str: str) -> None:
+        """Card declined or service error: return to OPEN so the customer can retry."""
+        session_id = UUID(session_id_str.removeprefix("cs_"))
+        with self.pool.connection() as conn:
+            conn.execute("UPDATE checkout_sessions SET status = 'OPEN', updated_at = now()"
+                         " WHERE session_id = %s AND status = 'PROCESSING'", (session_id,))
+
     def get(self, session_id_str: str, merchant_id: UUID) -> dict | None:
         try:
             session_id = UUID(session_id_str.removeprefix("cs_"))

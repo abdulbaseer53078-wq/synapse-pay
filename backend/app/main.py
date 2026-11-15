@@ -191,6 +191,7 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.state.authorization = AuthorizationService(repo, certification)
     app.state.certifications = CertificationAdmin(certifications, PostgresCertificationRuns(pool))
     cards = cards or HttpCardProcessor(settings.card_service_url)
+    app.state.cards = cards  # used by checkout /pay endpoint
     # Step 8: the one place a rail is chosen. Adding UPI was one line here and a module beside card.py.
     upi = UpiMethodAdapter(HttpUpiPsp(settings.upi_psp_url), webhook_secret=settings.upi_webhook_secret or None)
     wallet = WalletMethodAdapter(HttpWallet(settings.wallet_url),
