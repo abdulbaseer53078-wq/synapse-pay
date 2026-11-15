@@ -123,8 +123,15 @@ const SynapseCheckout = (() => {
 
   /* ── Encryption ──────────────────────────────────────────────────── */
 
-  async function _importPublicKey(pem) {
-    const b64 = pem.replace(/-----[^-]+-----/g, "").replace(/\s/g, "");
+  async function _importPublicKey(pemOrJwk) {
+    // Accepts either a JWK object/JSON string (from GET /api/v1/checkout/key)
+    // or a PEM-encoded SPKI public key string.
+    const jwk = (typeof pemOrJwk === "object" && pemOrJwk !== null) ? pemOrJwk
+              : (() => { try { const p = JSON.parse(pemOrJwk); return (p.kty) ? p : null; } catch { return null; } })();
+    if (jwk) {
+      return crypto.subtle.importKey("jwk", jwk, { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]);
+    }
+    const b64 = pemOrJwk.replace(/-----[^-]+-----/g, "").replace(/\s/g, "");
     const der = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
     return crypto.subtle.importKey("spki", der, { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]);
   }

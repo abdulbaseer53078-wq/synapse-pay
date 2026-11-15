@@ -59,24 +59,13 @@
 <script src="synapse.js"></script>
 <script>
   /*
-   * SANDBOX KEY — replace with the real RSA public key from your backend before going live.
-   * In production, fetch this from GET /api/v1/checkout/sessions/{id} or a dedicated key endpoint.
-   *
-   * To generate a test key pair locally:
-   *   openssl genrsa -out private.pem 2048
-   *   openssl rsa -in private.pem -pubout -out public.pem
-   * Then paste public.pem below.
+   * BACKEND_URL — change if your FastAPI server is on a different host/port.
+   * API_KEY     — replace with a real sk_live_... key from POST /api/v1/api-keys.
+   *               In production the merchant server creates the session server-side;
+   *               never expose a live API key in client-side JS.
    */
-  const SANDBOX_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2a2rwplBQLF29amygykE
-MmYz0+Kcj3bKBp29gNNBxEBXMPB0c/MFPFNpFHZCTF6+vVbUzSE5fAnk5nVLn5
-NFXN0LmHfBVHJGCBVFfKMSqfSUWXN3nFfZrCJRbMIRW7MlhKtBWAHXFe1B7qRW
-YHDq8FZgMR0Y1CIRzSMzOLQ1u7ggvbR0nfhgMBxpYZlBGhK1Ldc8AAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAB
------END PUBLIC KEY-----`;
+  const BACKEND_URL = "http://localhost:8000";
+  const API_KEY     = "sk_live_REPLACE_WITH_REAL_KEY";
 
   const statusEl = document.getElementById("status");
   const payBtn   = document.getElementById("pay-btn");
@@ -86,17 +75,21 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAB
     statusEl.textContent = "Creating checkout session…";
 
     try {
-      /*
-       * Step 1: ask the backend to create a session.
-       * Replace the Authorization header value with a real sk_live_... key.
-       * In production, the merchant server creates the session server-side and passes
-       * checkout_url to the browser — never expose the API key in client-side JS.
-       */
-      const res = await fetch("/api/v1/checkout/sessions", {
+      // Step 1: fetch the card-service's RSA public key (JWK).
+      const keyRes = await fetch(`${BACKEND_URL}/api/v1/checkout/key`);
+      if (!keyRes.ok) {
+        statusEl.textContent = "Could not fetch checkout key — is the card-service running?";
+        payBtn.disabled = false;
+        return;
+      }
+      const publicKey = await keyRes.json();
+
+      // Step 2: ask the backend to create a checkout session.
+      const res = await fetch(`${BACKEND_URL}/api/v1/checkout/sessions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": "Bearer sk_live_REPLACE_WITH_REAL_KEY",
+          "Authorization": `Bearer ${API_KEY}`,
         },
         body: JSON.stringify({
           amount: 50000,          // ₹500.00 in minor units
@@ -117,12 +110,13 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAB
       const session = await res.json();
       statusEl.textContent = "Session created — opening checkout…";
 
-      // Step 2: open the modal with the session URL and the RSA public key.
-      await SynapseCheckout.open(session.checkout_url, SANDBOX_PUBLIC_KEY);
+      // Step 3: open the SDK modal. POSTs encrypted card data to the backend pay endpoint.
+      const payUrl = `${BACKEND_URL}/api/v1/checkout/sessions/${session.session_id}/pay`;
+      await SynapseCheckout.open(payUrl, publicKey);
 
     } catch (err) {
-      statusEl.textContent = "Network error — is the backend running?";
-      console.error("[Demo] Session creation failed:", err.message);
+      statusEl.textContent = "Network error — is the backend running on " + BACKEND_URL + "?";
+      console.error("[Demo] Error:", err.message);
     } finally {
       payBtn.disabled = false;
     }
