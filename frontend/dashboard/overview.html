@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Synapse Pay — Overview</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50">
+
+<div class="flex min-h-screen">
+  <div id="sidebar-mount"></div>
+  <main class="ml-56 flex-1 p-8">
+    <h1 class="text-2xl font-bold text-gray-900 mb-6">Overview</h1>
+
+    <div id="stats" class="grid grid-cols-1 sm:grid-cols-3 gap-6">
+      <div class="stat-card bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <div class="text-sm text-gray-500 font-medium">Settlements</div>
+        <div id="stat-settlements" class="text-3xl font-bold text-gray-900 mt-2">—</div>
+      </div>
+      <div class="stat-card bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <div class="text-sm text-gray-500 font-medium">Open Risk Holds</div>
+        <div id="stat-holds" class="text-3xl font-bold text-gray-900 mt-2">—</div>
+      </div>
+      <div class="stat-card bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+        <div class="text-sm text-gray-500 font-medium">Active API Keys</div>
+        <div id="stat-keys" class="text-3xl font-bold text-gray-900 mt-2">—</div>
+      </div>
+    </div>
+
+    <p id="note" class="mt-4 text-xs text-gray-400 hidden">
+      Settlements and risk holds require a <code class="bg-gray-100 px-1 rounded">sk_live_</code> key.
+    </p>
+  </main>
+</div>
+
+<script src="_nav.js"></script>
+<script>
+  requireAuth();
+  renderSidebar("overview.html");
+
+  async function load() {
+    const [keysRes, settlRes, riskRes] = await Promise.all([
+      apiFetch("/api/v1/api-keys"),
+      apiFetch("/api/v1/settlements?limit=200"),
+      apiFetch("/api/v1/risk-status"),
+    ]);
+
+    if (keysRes && keysRes.ok) {
+      const { items } = await keysRes.json();
+      document.getElementById("stat-keys").textContent =
+        items.filter(k => !k.revoked_at).length;
+    }
+
+    if (settlRes && settlRes.ok) {
+      const { items } = await settlRes.json();
+      document.getElementById("stat-settlements").textContent = items.length;
+    } else {
+      document.getElementById("stat-settlements").textContent = "—";
+      document.getElementById("note").classList.remove("hidden");
+    }
+
+    if (riskRes && riskRes.ok) {
+      const { holds } = await riskRes.json();
+      document.getElementById("stat-holds").textContent = holds.length;
+    } else {
+      document.getElementById("stat-holds").textContent = "—";
+    }
+  }
+
+  load();
+</script>
+</body>
+</html>

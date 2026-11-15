@@ -54,14 +54,24 @@ Expected: `{"status":"ok"}` (or similar). The Swagger UI is at `http://localhost
 
 ---
 
-## 3. Submit KYC (required for live keys)
+## 3. Open the Merchant Dashboard
 
-Open `frontend/kyc.html` in your browser (open the file directly or via
-`python -m http.server 3000 --directory frontend` and visit `http://localhost:3000/kyc.html`).
+Serve the frontend and open the dashboard:
 
-1. Enter your `sk_test_...` key.
-2. Enter a valid PAN (`ABCDE1234F`) and GST (`29ABCDE1234F1Z5`) number.
-3. Click **Submit for Review**.
+```powershell
+python -m http.server 3000 --directory frontend
+```
+
+Visit `http://localhost:3000/dashboard/index.html` and sign in with your `sk_test_…` key.
+
+The dashboard includes Overview, Settlements, Risk Holds, API Keys, and KYC pages.
+
+## 4. Submit KYC (required for live keys)
+
+In the dashboard, navigate to **KYC** (`http://localhost:3000/dashboard/kyc.html`).
+
+1. Enter a valid PAN (`ABCDE1234F`) and GST (`29ABCDE1234F1Z5`) number.
+2. Click **Submit for Review**.
 
 In the sandbox you can manually approve KYC via psql:
 
@@ -73,7 +83,7 @@ Once approved, the KYC page shows a green banner and you can generate `sk_live_`
 
 ---
 
-## 4. Generate a live API key
+## 5. Generate a live API key
 
 ```powershell
 curl -X POST http://localhost:8000/api/v1/api-keys `
@@ -89,13 +99,13 @@ This returns a `sk_live_...` key. The key is shown only once. Without approved K
 
 ---
 
-## 5. Process a test payment
+## 6. Process a test payment
 
 Open `frontend/demo.html` in a browser. Edit the two constants at the top of the `<script>`:
 
 ```js
 const BACKEND_URL = "http://localhost:8000";
-const API_KEY     = "sk_live_XXXX";   // ← replace with the key from step 4
+const API_KEY     = "sk_live_XXXX";   // ← replace with the key from step 5
 ```
 
 Click **Pay ₹500**. The SDK will:
@@ -113,7 +123,9 @@ Click **Pay ₹500**. The SDK will:
 
 ---
 
-## 6. Check settlements
+## 7. Check settlements
+
+You can also view settlements in the dashboard at `http://localhost:3000/dashboard/settlements.html`, or via the API:
 
 ```powershell
 curl http://localhost:8000/api/v1/settlements `
@@ -124,7 +136,7 @@ Each settlement row shows gross amount, MDR (0% for subscription merchants), GST
 
 ---
 
-## 7. Run the tests
+## 8. Run the tests
 
 ```powershell
 # Python backend
@@ -152,7 +164,7 @@ pytest -q
 |---------|-----|
 | `docker compose up` fails | Ensure Docker Desktop is running |
 | `cargo build` fails | Run `rustup update stable` |
-| `KYC_REQUIRED` on key create | Approve KYC in psql (step 3) |
+| `KYC_REQUIRED` on key create | Approve KYC in psql (step 4) |
 | `FRAUD_DETECTED` 429 | 5+ failed attempts in 60 s from your IP; wait 1 minute |
 | Card service unreachable | Check the Rust process started (step 1 output) |
 
