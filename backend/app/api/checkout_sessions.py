@@ -1,9 +1,31 @@
 """Hosted checkout sessions for browser-based e-commerce (1.19.0)."""
+import threading
+import time
+from collections import defaultdict, deque
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+
+# shortcut: in-memory IP velocity — lost on restart, single-process only; use Redis in production.
+_vel_lock = threading.Lock()
+_ip_fails: dict[str, deque] = defaultdict(deque)
+_WINDOW_S, _MAX_FAILS = 60, 5
+
+
+def _is_rate_limited(ip: str) -> bool:
+    cutoff = time.time() - _WINDOW_S
+    with _vel_lock:
+        dq = _ip_fails[ip]
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        return len(dq) >= _MAX_FAILS
+
+
+def _record_failure(ip: str) -> None:
+    with _vel_lock:
+        _ip_fails[ip].append(time.time())
 
 from app.api.api_keys import verify_api_key
 from app.api.errors import error_response
@@ -61,6 +83,11 @@ def pay_session(session_id: str, body: PayBody, request: Request) -> dict | JSON
         # Either expired or already PROCESSING (double-click)
         raise InvalidInput("checkout session is not payable", code="CHECKOUT_SESSION_NOT_PAYABLE")
 
+    client_ip = request.client.host if request.client else "unknown"
+    if _is_rate_limited(client_ip):
+        return error_response(429, "FRAUD_DETECTED", "VALIDATION_ERROR",
+                              "too many failed attempts; try again later")
+
     tid, mid = online_acquirer_ids(session["merchant_id"])
     card_req = CardRequest(
         transaction_id=uuid4(),
@@ -83,5 +110,6 @@ def pay_session(session_id: str, body: PayBody, request: Request) -> dict | JSON
         return {"status": "APPROVED", "success_url": session["success_url"]}
 
     sessions.reopen(session_id)
+    _record_failure(client_ip)
     msg = (result.error or {}).get("error_message", "card declined")
     return error_response(402, "CARD_DECLINED", "VALIDATION_ERROR", msg)

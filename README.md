@@ -17,11 +17,15 @@
 
 ## 📖 Overview
 
-Synapse Pay is a reference architecture for a payment gateway. It bridges the gap between modern API orchestration and legacy banking protocols.
+Synapse Pay is a **payment gateway** (not an aggregator) built to compete with Razorpay and Stripe on three axes:
+
+- **0% MDR** — merchants pay nothing per transaction; Synapse Pay earns revenue via SaaS subscriptions.
+- **Radical transparency** — itemized settlement breakdowns (gross / MDR / GST / net), clear risk-hold reasons, and a hash-chained audit log.
+- **Offline-first edge nodes** — physical stores keep taking card payments during ISP outages; transactions are cryptographically signed, hash-chained, and reconciled automatically.
+
+Unlike traditional gateways, Synapse Pay **never holds or pools merchant funds** — it routes card data to the acquiring bank and steps out of the way, keeping it out of the heaviest regulatory tier.
 
 > **Status:** sandbox only. All acquirers, banks and the HSM are simulated.
-
-Unlike traditional gateways that fail during network drops, Synapse Pay uses a **distributed edge-node architecture**. Terminals can process cryptographically signed transactions offline and reconcile with the cloud when connectivity is restored.
 
 ## 🏗️ Architecture
 
@@ -53,6 +57,10 @@ graph TD
 *   **📴 Offline-First Edge Nodes:** Terminals can process payments locally during ISP outages. Rules are cryptographically signed by the cloud. Local transactions are hash-chained to prevent tampering, then synced idempotently.
 *   **🔄 Smart Reversals:** If an acquirer times out, the system does *not* blindly retry on another host (avoiding double charges). It queues a durable reversal to cancel the first request.
 *   **📊 Observability:** Prometheus metrics, OpenTelemetry tracing, and a hash-chained audit log for compliance.
+*   **🪪 Merchant KYC:** PAN + GST submission with PENDING / APPROVED / REJECTED lifecycle; live key generation is gated on approval.
+*   **🛡️ Fraud Velocity Check:** IP-based rate limiting blocks IPs with 5+ failed payment attempts in 60 seconds (`FRAUD_DETECTED`, HTTP 429).
+*   **💳 Transparent Settlements:** itemized breakdown of gross, MDR (0%), GST, and net for every settlement batch.
+*   **📋 Subscription Engine:** merchants subscribe to a plan to unlock 0% MDR, offline edge entitlement, and live-mode keys.
 
 ## 🚀 Quick Start
 
@@ -101,6 +109,8 @@ pytest edge-node/tests
 ```
 
 ## 📚 Documentation
+
+*   [**Launch Guide**](docs/launch-guide.md) — run `run_dev.ps1`, log in, process a test payment end-to-end.
 
 Deep-dive into the architecture and design decisions:
 *   [API Contract & Idempotency](docs/understanding/01-api-contract.md)

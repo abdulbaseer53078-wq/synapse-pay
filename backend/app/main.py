@@ -11,6 +11,7 @@ from prometheus_client import REGISTRY, start_http_server
 from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import ConnectionPool
 
+from app.api import kyc as kyc_api
 from app.api import certification_runs as certification_runs_api
 from app.api import card_tokens as card_tokens_api
 from app.api import chargebacks as chargebacks_api
@@ -73,6 +74,7 @@ from app.infrastructure.postgres_edge import PostgresEdgeNodes
 from app.infrastructure.postgres_edge_chain import PostgresEdgeChain
 from app.infrastructure.rules_signer import EcdsaRulesSigner
 from app.infrastructure.postgres_checkout_sessions import PostgresCheckoutSessions
+from app.infrastructure.postgres_kyc import PostgresKyc
 from app.infrastructure.postgres_risk import PostgresRisk
 from app.infrastructure.postgres_settlements import PostgresSettlements
 from app.infrastructure.postgres_subscriptions import PostgresSubscriptions
@@ -234,6 +236,7 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
                                                provider="wallet")
     app.state.intents = PaymentIntentService(PostgresIntentRepository(pool, ConfigFeePolicy(settings.fee_bps)), cards)
     app.state.card_tokens = CardTokenService(cards)  # Step 29: the vault is card-service's; this only relays
+    app.state.kyc = PostgresKyc(pool)
     app.state.api_keys = PostgresApiKeys(pool)
     app.state.checkout_sessions = PostgresCheckoutSessions(pool)
     app.state.settlements = PostgresSettlements(pool)
@@ -272,4 +275,5 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.include_router(chargebacks_api.router)
     app.include_router(certification_runs_api.router)
     app.include_router(edge.router)
+    app.include_router(kyc_api.router)
     return app

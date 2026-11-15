@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Synapse Pay — KYC Verification</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #f5f5f7;
+      margin: 0;
+      padding: 24px;
+    }
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      padding: 40px;
+      max-width: 440px;
+      width: 100%;
+      box-shadow: 0 4px 24px rgba(0,0,0,.10);
+    }
+    h1 { font-size: 22px; margin: 0 0 4px; color: #111; }
+    .subtitle { color: #666; font-size: 14px; margin: 0 0 28px; }
+
+    /* Status banner */
+    .banner {
+      display: none;
+      border-radius: 10px;
+      padding: 12px 16px;
+      font-size: 14px;
+      margin-bottom: 20px;
+      line-height: 1.5;
+    }
+    .banner.warning { background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; }
+    .banner.success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+    .banner.pending { background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+    .banner.rejected { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; }
+
+    /* API key input */
+    .api-key-row { margin-bottom: 24px; }
+    label { display: block; font-size: 13px; font-weight: 600; color: #333; margin-bottom: 6px; }
+    input[type=text], input[type=password] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1.5px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input:focus { border-color: #4f46e5; }
+
+    /* Form fields */
+    .field { margin-bottom: 18px; }
+    .hint { font-size: 12px; color: #9ca3af; margin-top: 4px; }
+
+    button[type=submit] {
+      width: 100%;
+      background: #4f46e5;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      padding: 13px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+      margin-top: 4px;
+    }
+    button[type=submit]:hover { background: #4338ca; }
+    button[type=submit]:disabled { background: #a5b4fc; cursor: default; }
+
+    #msg {
+      margin-top: 14px;
+      font-size: 14px;
+      color: #666;
+      min-height: 20px;
+      text-align: center;
+    }
+    .divider { border: none; border-top: 1px solid #e5e7eb; margin: 28px 0; }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <h1>KYC Verification</h1>
+  <p class="subtitle">Submit your PAN and GST details to unlock live API key generation.</p>
+
+  <!-- Banner shown after status is loaded -->
+  <div class="banner warning" id="banner-kyc-required">
+    ⚠ KYC not approved — you can use <code>sk_test_</code> keys but cannot generate
+    <code>sk_live_</code> keys until your submission is reviewed.
+  </div>
+  <div class="banner success" id="banner-approved">
+    ✓ KYC approved — you can generate live API keys.
+  </div>
+  <div class="banner pending" id="banner-pending">
+    ⏳ KYC under review — we will update your status within 24 hours.
+  </div>
+  <div class="banner rejected" id="banner-rejected">
+    ✗ KYC rejected — please correct your details and resubmit.
+  </div>
+
+  <!-- API key (stored in localStorage for convenience) -->
+  <div class="api-key-row">
+    <label for="api-key">Your API key (sk_test_...)</label>
+    <input type="password" id="api-key" placeholder="sk_test_…" autocomplete="off">
+  </div>
+
+  <hr class="divider">
+
+  <form id="kyc-form">
+    <div class="field">
+      <label for="pan">PAN Number</label>
+      <input type="text" id="pan" name="pan_number" placeholder="ABCDE1234F"
+             maxlength="10" style="text-transform:uppercase" required>
+      <div class="hint">10 characters: 5 letters, 4 digits, 1 letter — e.g. ABCDE1234F</div>
+    </div>
+    <div class="field">
+      <label for="gst">GST Number</label>
+      <input type="text" id="gst" name="gst_number" placeholder="29ABCDE1234F1Z5"
+             maxlength="15" style="text-transform:uppercase" required>
+      <div class="hint">15-character GSTIN — e.g. 29ABCDE1234F1Z5</div>
+    </div>
+    <button type="submit" id="submit-btn">Submit for Review</button>
+  </form>
+
+  <div id="msg"></div>
+</div>
+
+<script>
+  const BACKEND_URL = "http://localhost:8000";
+  const keyInput  = document.getElementById("api-key");
+  const msgEl     = document.getElementById("msg");
+  const submitBtn = document.getElementById("submit-btn");
+
+  // Persist API key in localStorage for convenience (test key only, never sk_live_)
+  try {
+    const saved = localStorage.getItem("sp_api_key");
+    if (saved) keyInput.value = saved;
+  } catch (_) {}
+
+  keyInput.addEventListener("change", () => {
+    try { localStorage.setItem("sp_api_key", keyInput.value.trim()); } catch (_) {}
+    loadStatus();
+  });
+
+  function showBanner(status) {
+    ["kyc-required", "approved", "pending", "rejected"].forEach(id =>
+      document.getElementById("banner-" + id).style.display = "none");
+    if (status === "APPROVED")      document.getElementById("banner-approved").style.display = "block";
+    else if (status === "PENDING")  document.getElementById("banner-pending").style.display = "block";
+    else if (status === "REJECTED") document.getElementById("banner-rejected").style.display = "block";
+    else                            document.getElementById("banner-kyc-required").style.display = "block";
+  }
+
+  async function loadStatus() {
+    const key = keyInput.value.trim();
+    if (!key) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/v1/kyc/status`, {
+        headers: { "Authorization": "Bearer " + key }
+      });
+      if (!res.ok) { showBanner(null); return; }
+      const { status } = await res.json();
+      showBanner(status);
+    } catch (_) {}
+  }
+
+  // Force uppercase on PAN / GST inputs
+  ["pan", "gst"].forEach(id => {
+    const el = document.getElementById(id);
+    el.addEventListener("input", () => { el.value = el.value.toUpperCase(); });
+  });
+
+  document.getElementById("kyc-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const key = keyInput.value.trim();
+    if (!key) { msgEl.textContent = "Enter your API key first."; return; }
+
+    submitBtn.disabled = true;
+    msgEl.textContent = "Submitting…";
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/v1/kyc/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+        body: JSON.stringify({
+          pan_number: document.getElementById("pan").value.trim(),
+          gst_number: document.getElementById("gst").value.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        msgEl.textContent = "✓ Submitted — status: " + data.status;
+        showBanner("PENDING");
+      } else {
+        msgEl.textContent = "Error: " + (data.error_message || res.status);
+      }
+    } catch (err) {
+      msgEl.textContent = "Network error — is the backend running?";
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+
+  loadStatus();
+</script>
+</body>
+</html>

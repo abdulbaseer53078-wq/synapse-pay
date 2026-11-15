@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.api.auth import merchant_from_api_key
-from app.application.registration import Unauthenticated
+from app.application.registration import InvalidInput, Unauthenticated
 
 _bearer = HTTPBearer(auto_error=False)
 router = APIRouter(tags=["api-keys"])
@@ -33,6 +33,8 @@ def list_api_keys(request: Request, merchant: UUID = Depends(merchant_from_api_k
 
 @router.post("/api/v1/api-keys", status_code=201)
 def create_api_key(request: Request, merchant: UUID = Depends(merchant_from_api_key)) -> dict:
+    if request.app.state.kyc.status_for(merchant) != "APPROVED":
+        raise InvalidInput("KYC must be approved before generating live keys", code="KYC_REQUIRED")
     key, key_id = request.app.state.api_keys.create(merchant, mode="live")
     return {
         "key_id": str(key_id),
