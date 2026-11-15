@@ -16,6 +16,7 @@ from app.api import card_tokens as card_tokens_api
 from app.api import chargebacks as chargebacks_api
 from app.api import reconciliation as reconciliation_api
 from app.api import refunds as refunds_api
+from app.api import api_keys as api_keys_api
 from app.api import risk as risk_api
 from app.api import settlements as settlements_api
 from app.api import subscriptions as subscriptions_api
@@ -260,6 +261,7 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.include_router(refunds_api.router)
     app.include_router(subscriptions_api.router)
     app.include_router(reconciliation_api.router)
+    app.include_router(api_keys_api.router)
     app.include_router(settlements_api.router)
     app.include_router(risk_api.router)
     app.include_router(chargebacks_api.router)

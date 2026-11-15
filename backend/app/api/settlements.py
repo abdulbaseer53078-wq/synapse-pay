@@ -12,6 +12,7 @@ router = APIRouter(tags=["settlements"])
 def list_settlements(
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
+    after: str | None = Query(default=None),
     merchant: UUID = Depends(verify_api_key),
 ) -> dict:
-    return {"settlements": request.app.state.settlements.list_for_merchant(merchant, limit)}
+    return request.app.state.settlements.list_for_merchant(merchant, limit=limit, after=after)
