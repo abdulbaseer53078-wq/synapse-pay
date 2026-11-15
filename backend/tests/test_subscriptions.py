@@ -121,7 +121,7 @@ def test_an_admin_upgrades_a_merchant_to_pro(api):
     r = client.post("/api/v1/subscriptions/upgrade", headers=_token(key), json={"merchant_id": str(merchant)})
     assert r.status_code == 200, r.text
     assert r.json() == {"merchant_id": str(merchant), "tier": "PRO", "status": "ACTIVE",
-                        "current_period_end": (NOW + timedelta(days=30)).isoformat()}
+                        "current_period_end": (NOW + timedelta(days=30)).isoformat(), "renewal_count": 0}
     assert repo.saves[0][2] == "admin-ops-1", "the token subject is the audited actor"
 
 

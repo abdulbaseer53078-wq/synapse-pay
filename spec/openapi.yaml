@@ -4,7 +4,7 @@ info:
   version: 1.20.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
-    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook. 1.16.0 adds merchant subscriptions: POST /v1/subscriptions/upgrade and SUBSCRIPTION_CONFLICT. 1.18.0 adds merchant experience: API key management (POST/GET/DELETE /v1/api-keys), transparent settlements (GET /v1/settlements), and risk visibility (GET /v1/risk-status). 1.19.0 adds e-commerce features: hosted Web Checkout Sessions (POST/GET /v1/checkout/sessions), POST /v1/checkout/sessions/{id}/pay (the SDK's card-submission endpoint), and GET /v1/transactions/{id}/refunds to list refunds on a transaction. 1.20.0 adds merchant KYC: POST /v1/kyc/submit and GET /v1/kyc/status; live key creation is now gated on APPROVED KYC status.
+    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook. 1.16.0 adds merchant subscriptions: POST /v1/subscriptions/upgrade and SUBSCRIPTION_CONFLICT. 1.17.0 adds auto-renewal: POST /v1/subscriptions/renew (billing:webhook scope) and Subscription.renewal_count. 1.18.0 adds merchant experience: API key management (POST/GET/DELETE /v1/api-keys), transparent settlements (GET /v1/settlements), and risk visibility (GET /v1/risk-status). 1.19.0 adds e-commerce features: hosted Web Checkout Sessions (POST/GET /v1/checkout/sessions), POST /v1/checkout/sessions/{id}/pay (the SDK's card-submission endpoint), and GET /v1/transactions/{id}/refunds to list refunds on a transaction. 1.20.0 adds merchant KYC: POST /v1/kyc/submit and GET /v1/kyc/status; live key creation is now gated on APPROVED KYC status.
 servers:
   - url: /api
 # Merchant backends use OAuth2; terminals use mTLS. Either satisfies a request.
@@ -574,6 +574,36 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
+  /v1/subscriptions/renew:
+    post:
+      operationId: renewSubscription
+      summary: Renew a merchant's paid plan for another period (billing webhook)
+      description: >-
+        Since 1.17.0. Called after a successful charge. Extends an ACTIVE PRO or ENTERPRISE period by 30 days from
+        current_period_end (not from now, so a late webhook causes no drift); audited. Safe to retry: a merchant
+        with more than one full period still ahead is returned unchanged. A FREE, PAST_DUE or CANCELED merchant is
+        returned unchanged too: nothing is renewed and nothing fails. Needs the billing:webhook scope; a merchant's
+        or an admin's token is refused.
+      security: [{ OAuth2ClientCredentials: [billing:webhook] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [merchant_id]
+              properties:
+                merchant_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The merchant's subscription, renewed or unchanged.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
 
   # ── API key management (1.18.0) ────────────────────────────────────────────
   # The api_keys table was introduced in 008_payment_intents.sql. These endpoints
@@ -856,7 +886,7 @@ paths:
                 properties:
                   items:
                     type: array
-                    items: { $ref: '#/components/schemas/RefundResponse' }
+                    items: { $ref: '#/components/schemas/Refund' }
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
 
@@ -1854,6 +1884,7 @@ components:
             certification:run: Record certification test harness runs (CI, test lab); approves nothing
             registry:authorize: Routing engine's per-transaction terminal authorization check
             audit:read: Read the append-only audit log (support, compliance and dispute tooling)
+            billing:webhook: Billing provider's renewal callback (1.17.0); renews a paid plan after a charge
     # Merchant server → cloud with a secret API key (1.3.0): Authorization: Bearer sk_test_...
     SecretKey:
       type: http
@@ -2324,7 +2355,7 @@ components:
     Subscription:
       type: object
       additionalProperties: false
-      required: [merchant_id, tier, status, current_period_end]
+      required: [merchant_id, tier, status, current_period_end, renewal_count]
       properties:
         merchant_id: { type: string, format: uuid }
         tier: { type: string, enum: [FREE, PRO, ENTERPRISE] }
@@ -2333,6 +2364,10 @@ components:
           type: [string, 'null']
           format: date-time
           description: When the paid period ends. null for the implicit FREE plan of a merchant with no subscription.
+        renewal_count:
+          type: integer
+          minimum: 0
+          description: Since 1.17.0. How many times the paid period was renewed; 0 for a plan that was only upgraded.
     Certification:
       type: object
       additionalProperties: false
@@ -3160,13 +3195,12 @@ components:
           description: Open this URL in the customer's browser immediately. Valid until expires_at.
         amount:         { type: integer, format: int64 }
         currency:       { type: string }
-        description:    { type: string, nullable: true }
+        description:    { type: [string, 'null'] }
         status:
           type: string
           enum: [OPEN, PROCESSING, COMPLETED, EXPIRED, CANCELED]
         intent_id:
-          type: string
-          nullable: true
+          type: [string, 'null']
           description: "pi_<32 hex> of the payment intent created when the customer submits their card. Null until then."
         success_url:    { type: string, format: uri }
         cancel_url:     { type: string, format: uri }
@@ -3196,7 +3230,7 @@ components:
         key_id:     { type: string, format: uuid }
         prefix:     { type: string, description: "First 12 characters of the key (e.g. sk_live_xK3p), for identification only." }
         created_at: { type: string, format: date-time }
-        revoked_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: [string, 'null'], format: date-time }
 
     ApiKeyCreated:
       type: object
@@ -3229,7 +3263,7 @@ components:
       properties:
         hold_id:            { type: string, format: uuid }
         merchant_id:        { type: string, format: uuid }
-        transaction_id:     { type: string, format: uuid, nullable: true, description: "Null for account-level holds." }
+        transaction_id:     { type: [string, 'null'], format: uuid, description: "Null for account-level holds." }
         reason:
           type: string
           enum: [VELOCITY_BREACH, DOCUMENT_REQUIRED, AML_REVIEW, SANCTIONS_HIT, MANUAL_REVIEW]
@@ -3241,7 +3275,7 @@ components:
           type: string
           enum: [OPEN, REVIEWING, RELEASED, ESCALATED]
         created_at:   { type: string, format: date-time }
-        resolved_at:  { type: string, format: date-time, nullable: true }
+        resolved_at:  { type: [string, 'null'], format: date-time }
 
     OfflineDetails:
       type: object

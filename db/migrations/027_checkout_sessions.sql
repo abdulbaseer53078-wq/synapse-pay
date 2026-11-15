@@ -8,6 +8,8 @@
 
 BEGIN;
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;  -- gen_random_bytes used for url_token
+
 CREATE TABLE checkout_sessions (
     session_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),   -- exposed as cs_<32 hex>
     merchant_id     UUID NOT NULL REFERENCES merchants,

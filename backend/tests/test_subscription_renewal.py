@@ -193,9 +193,8 @@ def test_renewal_count_increments_on_each_renewal():
 
     service = _service(repo)
     first = service.renew_subscription(merchant, ACTOR)
-    # advance the clock so the second call sees an expiring period
-    repo.rows[merchant] = Subscription(merchant, "PRO", "ACTIVE",
-                                       first.current_period_end - timedelta(days=1))
+    # as if time passed: the renewed period is now a day from ending, so the second call sees an expiring period
+    repo.rows[merchant] = Subscription(merchant, "PRO", "ACTIVE", NOW + timedelta(days=1), first.renewal_count)
     second = service.renew_subscription(merchant, ACTOR)
 
     assert first.renewal_count == 1
