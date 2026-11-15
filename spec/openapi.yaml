@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: Synapse Pay API
-  version: 1.15.0
+  version: 1.20.0
   description: >-
     v1 was frozen at 1.0.0: later 1.x versions only add to it. Any breaking change
-    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook.
+    goes through a versioned process (e.g. a /v2 endpoint). 1.1.0 adds terminal registration, transaction-time authorization and the registry query API. 1.2.0 adds the optional CardDetails.pin_block and documents the card data envelope. 1.3.0 adds payment intents (merchant SDKs), terminal checkout, and payment_intent_id on transactions. 1.11.0 adds the optional CardDetails.emv_data (chip data, sent as DE 55) and certification test runs, which gate createCertification. 1.12.0 adds saved cards: POST/DELETE /v1/card-tokens and CardDetails.card_token. 1.13.0 adds refund, capture and void, and corrects the CARD and WALLET descriptors to what the API can do today. 1.13.1 deprecates saved cards (card_token, /v1/card-tokens) pending a PCI DSS review. 1.14.0 adds the edge node's hash chain (edge_seq, prev_hash) to sync items, the cloud's rolling 24-hour offline limit, and the settlement reconciliation reports. 1.15.0 adds chargebacks: the acquirer's signed notices, the merchant's view and evidence, and the chargebackStatus webhook. 1.16.0 adds merchant subscriptions: POST /v1/subscriptions/upgrade and SUBSCRIPTION_CONFLICT. 1.17.0 adds auto-renewal: POST /v1/subscriptions/renew (billing:webhook scope) and Subscription.renewal_count. 1.18.0 adds merchant experience: API key management (POST/GET/DELETE /v1/api-keys), transparent settlements (GET /v1/settlements), and risk visibility (GET /v1/risk-status). 1.19.0 adds e-commerce features: hosted Web Checkout Sessions (POST/GET /v1/checkout/sessions), POST /v1/checkout/sessions/{id}/pay (the SDK's card-submission endpoint), and GET /v1/transactions/{id}/refunds to list refunds on a transaction. 1.20.0 adds merchant KYC: POST /v1/kyc/submit and GET /v1/kyc/status; live key creation is now gated on APPROVED KYC status.
 servers:
   - url: /api
 # Merchant backends use OAuth2; terminals use mTLS. Either satisfies a request.
@@ -264,6 +264,99 @@ paths:
                   y: { type: string }
         4XX: { $ref: '#/components/responses/Error' }
         5XX: { $ref: '#/components/responses/Error' }
+
+  # ── Web Checkout Sessions (1.19.0) ─────────────────────────────────────────
+  # A merchant server creates a session; the customer's browser opens checkout_url.
+  # Synapse hosts the card form, creates a payment intent internally, and redirects to
+  # success_url (with session_id query param) or cancel_url when done.
+  /v1/checkout/sessions:
+    post:
+      operationId: createCheckoutSession
+      summary: Create a hosted checkout session
+      description: >-
+        Since 1.19.0. The response includes a checkout_url the merchant redirects the customer's
+        browser to. Synapse hosts the payment page; the merchant's server never touches card data.
+        The session expires after 30 minutes if the customer does not complete payment.
+        On completion the customer is redirected to success_url?session_id=cs_<hex>.
+        On cancellation or expiry the customer is redirected to cancel_url?session_id=cs_<hex>.
+      security: [{ HttpApiKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCheckoutSessionRequest' }
+      responses:
+        '201':
+          description: The session. Open checkout_url in the customer's browser immediately.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckoutSession' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /v1/checkout/sessions/{session_id}:
+    get:
+      operationId: getCheckoutSession
+      summary: Retrieve a checkout session
+      description: >-
+        Since 1.19.0. Poll for status after the customer is redirected back to success_url.
+        status is COMPLETED when payment succeeded, CANCELED when the customer abandoned,
+        EXPIRED when the 30-minute window passed, or PROCESSING while the payment is in flight.
+      security: [{ HttpApiKey: [] }]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckoutSession' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/checkout/sessions/{session_id}/pay:
+    post:
+      operationId: submitCheckoutPayment
+      summary: Submit card payment for a checkout session
+      description: >-
+        Since 1.19.0. Called by the Synapse JS SDK from the customer's browser.
+        Card data MUST be encrypted with RSA-OAEP SHA-256 to the key from GET /v1/checkout/key
+        before submission — the backend rejects any payload whose decrypted size or structure
+        does not match the expected card envelope. The SDK does this automatically.
+        A session may only be paid once; retrying a COMPLETED or PROCESSING session returns 409.
+        On success the session transitions to PROCESSING and the response includes the success_url
+        to redirect the customer to.
+      security: [{}]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema: { type: string, description: "cs_<32 hex>" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubmitCheckoutPaymentRequest' }
+      responses:
+        '200':
+          description: Card accepted; payment in flight. Redirect the customer to success_url.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [success_url]
+                properties:
+                  success_url: { type: string, format: uri }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        5XX: { $ref: '#/components/responses/Error' }
+
   /v1/merchants/me/recovery-stats:
     get:
       operationId: getRecoveryStats
@@ -449,6 +542,186 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
+  /v1/subscriptions/upgrade:
+    post:
+      operationId: upgradeSubscription
+      summary: Move a merchant to an active PRO plan (platform admin)
+      description: >-
+        Since 1.16.0. Offline (edge node) payments need an ACTIVE PRO or ENTERPRISE plan whose period hasn't ended;
+        a merchant with no plan is on FREE. Starts a 30-day PRO period; audited. Platform admin only until a billing
+        provider takes payment for plans. Safe to retry: a merchant already on an active PRO period is returned
+        unchanged (the period is not extended). 409 SUBSCRIPTION_CONFLICT for a merchant on an active ENTERPRISE
+        plan, since moving to PRO would be a downgrade. 422 MERCHANT_NOT_FOUND for an unknown merchant.
+      security: [{ OAuth2ClientCredentials: [registry:admin] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [merchant_id]
+              properties:
+                merchant_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The merchant's subscription after the upgrade.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /v1/subscriptions/renew:
+    post:
+      operationId: renewSubscription
+      summary: Renew a merchant's paid plan for another period (billing webhook)
+      description: >-
+        Since 1.17.0. Called after a successful charge. Extends an ACTIVE PRO or ENTERPRISE period by 30 days from
+        current_period_end (not from now, so a late webhook causes no drift); audited. Safe to retry: a merchant
+        with more than one full period still ahead is returned unchanged. A FREE, PAST_DUE or CANCELED merchant is
+        returned unchanged too: nothing is renewed and nothing fails. Needs the billing:webhook scope; a merchant's
+        or an admin's token is refused.
+      security: [{ OAuth2ClientCredentials: [billing:webhook] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [merchant_id]
+              properties:
+                merchant_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The merchant's subscription, renewed or unchanged.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+
+  # ── API key management (1.18.0) ────────────────────────────────────────────
+  # The api_keys table was introduced in 008_payment_intents.sql. These endpoints
+  # let merchants manage their own keys without calling support.
+  /v1/api-keys:
+    get:
+      operationId: listApiKeys
+      summary: List the caller's API keys
+      description: >-
+        Since 1.18.0. Returns all non-revoked API keys for the authenticated merchant, identified by prefix
+        (first 12 characters of the key) so merchants can tell them apart without exposing the secret.
+        The secret itself is shown only once, at creation.
+      security: [{ HttpApiKey: [] }]
+      responses:
+        '200':
+          description: The merchant's active API keys.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ApiKey' }
+        '401': { $ref: '#/components/responses/Error' }
+    post:
+      operationId: createApiKey
+      summary: Create a new API key
+      description: >-
+        Since 1.18.0. Issues a new secret API key for the caller's merchant account. The full key is returned
+        exactly once in secret_key; it is not stored and cannot be retrieved again. Keys have the prefix
+        sk_live_ in production and sk_test_ in sandbox. Existing keys remain valid.
+      security: [{ HttpApiKey: [] }]
+      responses:
+        '201':
+          description: The new key. Store secret_key immediately — it cannot be shown again.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeyCreated' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+  /v1/api-keys/{key_id}:
+    delete:
+      operationId: revokeApiKey
+      summary: Revoke an API key
+      description: >-
+        Since 1.18.0. Permanently revokes the key. Any request using it will receive 401 immediately.
+        The calling key can revoke itself; revocation takes effect on the next request.
+        Idempotent: revoking an already-revoked key returns 204.
+      security: [{ HttpApiKey: [] }]
+      parameters:
+        - name: key_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Key revoked. }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  # ── Merchant KYC (1.20.0) ────────────────────────────────────────────────────
+  /v1/kyc/submit:
+    post:
+      operationId: submitKyc
+      summary: Submit KYC documents
+      description: >-
+        Since 1.20.0. Submits PAN and GST numbers for verification. Status transitions
+        to PENDING immediately; poll GET /v1/kyc/status to check progress. Live-key
+        creation (POST /v1/api-keys) is gated on APPROVED status.
+      security: [{ HttpApiKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [pan_number, gst_number]
+              properties:
+                pan_number:
+                  type: string
+                  pattern: '^[A-Z]{5}[0-9]{4}[A-Z]$'
+                  description: "10-character Permanent Account Number."
+                gst_number:
+                  type: string
+                  pattern: '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$'
+                  description: "15-character GST Identification Number."
+      responses:
+        '202': { description: Submission accepted; KYC status is now PENDING. }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /v1/kyc/status:
+    get:
+      operationId: getKycStatus
+      summary: Get KYC verification status
+      description: >-
+        Since 1.20.0. Returns the merchant's current KYC status.
+        NOT_SUBMITTED until the first submission, PENDING during review,
+        APPROVED once cleared, or REJECTED.
+      security: [{ HttpApiKey: [] }]
+      responses:
+        '200':
+          description: Current KYC status.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [NOT_SUBMITTED, PENDING, APPROVED, REJECTED]
+        '401': { $ref: '#/components/responses/Error' }
+
   /v1/card-tokens:
     post:
       operationId: createCardToken
@@ -585,6 +858,143 @@ paths:
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
         '422': { $ref: '#/components/responses/Error' }
+
+  /v1/transactions/{transaction_id}/refunds:
+    get:
+      operationId: listRefunds
+      summary: List refunds on a transaction
+      description: >-
+        Since 1.19.0. Returns every refund for the given transaction, newest first.
+        PENDING refunds are included (they count against the refundable amount).
+        Returns an empty list for a transaction with no refunds; 404 only if the
+        transaction itself is not found or belongs to a different merchant.
+      security: [{ HttpApiKey: [] }]
+      parameters:
+        - name: transaction_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Refunds for the transaction.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Refund' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  # ── Transparent settlements (1.18.0) ────────────────────────────────────────
+  # Derived from the double-entry ledger (migration 016 / merchant_settlements view).
+  # Amounts are in minor currency units (paise for INR). gst_on_fee is 18% of mdr_fee,
+  # computed by the view; it is not a separate ledger posting yet (see migration 025 shortcut note).
+  /v1/settlements:
+    get:
+      operationId: listSettlements
+      summary: Itemized settlement records
+      description: >-
+        Since 1.18.0. Returns every settlement for the caller's merchant account, one row per captured
+        payment. Each row shows gross (what the customer paid), mdr_fee (Merchant Discount Rate),
+        gst_on_fee (18% GST on MDR, derived), and net_amount (what the merchant receives).
+        Sorted newest-first. Paginated with cursor (after parameter).
+      security: [{ HttpApiKey: [] }]
+      parameters:
+        - name: from_date
+          in: query
+          schema: { type: string, format: date }
+          description: Inclusive start date (YYYY-MM-DD, UTC). Defaults to 30 days ago.
+        - name: to_date
+          in: query
+          schema: { type: string, format: date }
+          description: Inclusive end date (YYYY-MM-DD, UTC). Defaults to today.
+        - name: after
+          in: query
+          schema: { type: string }
+          description: Cursor from a previous response's next_cursor for the next page.
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        '200':
+          description: Paginated settlement rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Settlement' }
+                  next_cursor:
+                    type: string
+                    description: Absent when there are no further pages.
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  # ── Risk visibility (1.18.0) ────────────────────────────────────────────────
+  # Rows are created by the risk engine (behind RiskEngineInterface; mocked for now).
+  # Merchants can read them; only platform admins can create or escalate them.
+  /v1/risk-status:
+    get:
+      operationId: listRiskHolds
+      summary: Active risk holds on the caller's account
+      description: >-
+        Since 1.18.0. Returns all OPEN and REVIEWING holds for the authenticated merchant.
+        Each hold shows the reason, the documents required to release it, and the current status.
+        internal_notes are never returned. RELEASED and ESCALATED holds are excluded by default;
+        pass status=all to include them.
+      security: [{ HttpApiKey: [] }]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [open, all]
+            default: open
+      responses:
+        '200':
+          description: The merchant's risk holds.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/RiskHold' }
+        '401': { $ref: '#/components/responses/Error' }
+  /v1/risk-status/{hold_id}:
+    get:
+      operationId: getRiskHold
+      summary: A single risk hold with full document list
+      description: >-
+        Since 1.18.0. Returns a single hold. 404 RISK_HOLD_NOT_FOUND if the hold does not exist
+        or belongs to a different merchant.
+      security: [{ HttpApiKey: [] }]
+      parameters:
+        - name: hold_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The risk hold.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RiskHold' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+
   /v1/reconciliation/runs:
     get:
       operationId: listReconciliationRuns
@@ -1474,8 +1884,14 @@ components:
             certification:run: Record certification test harness runs (CI, test lab); approves nothing
             registry:authorize: Routing engine's per-transaction terminal authorization check
             audit:read: Read the append-only audit log (support, compliance and dispute tooling)
+            billing:webhook: Billing provider's renewal callback (1.17.0); renews a paid plan after a charge
     # Merchant server → cloud with a secret API key (1.3.0): Authorization: Bearer sk_test_...
     SecretKey:
+      type: http
+      scheme: bearer
+      bearerFormat: sk_test_... / sk_live_...
+    # Merchant dashboard / self-service (1.18.0): same Bearer format, test or live key accepted.
+    HttpApiKey:
       type: http
       scheme: bearer
       bearerFormat: sk_test_... / sk_live_...
@@ -1936,6 +2352,22 @@ components:
         certificate_number: { type: string, maxLength: 128, description: The scheme's own reference. }
         valid_from: { type: string, format: date-time, description: Default now. }
         valid_until: { type: string, format: date-time }
+    Subscription:
+      type: object
+      additionalProperties: false
+      required: [merchant_id, tier, status, current_period_end, renewal_count]
+      properties:
+        merchant_id: { type: string, format: uuid }
+        tier: { type: string, enum: [FREE, PRO, ENTERPRISE] }
+        status: { type: string, enum: [ACTIVE, PAST_DUE, CANCELED] }
+        current_period_end:
+          type: [string, 'null']
+          format: date-time
+          description: When the paid period ends. null for the implicit FREE plan of a merchant with no subscription.
+        renewal_count:
+          type: integer
+          minimum: 0
+          description: Since 1.17.0. How many times the paid period was renewed; 0 for a plan that was only upgraded.
     Certification:
       type: object
       additionalProperties: false
@@ -2316,6 +2748,11 @@ components:
             - CHARGEBACK_NOT_DISPUTABLE
             - CHARGEBACK_EVIDENCE_LATE
             - TRANSACTION_IN_DISPUTE
+            - SUBSCRIPTION_CONFLICT
+            - API_KEY_NOT_FOUND
+            - RISK_HOLD_NOT_FOUND
+            - CHECKOUT_SESSION_NOT_FOUND
+            - CHECKOUT_SESSION_EXPIRED
           description: >-
             Machine-readable code. ISSUER_DECLINED (since 1.1.0) covers issuer declines without a more
             specific code; error_category says whether it's soft or hard. Values are added over time, so
@@ -2709,6 +3146,136 @@ components:
           description: >-
             The payment rail the QR resolves to; downstream routing and capability logic
             read this. Client-supplied, so the server must check it against qr_data.
+
+    # ── 1.19.0 schemas ──────────────────────────────────────────────────────────
+    CreateCheckoutSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [amount, success_url, cancel_url]
+      properties:
+        amount:
+          type: integer
+          format: int64
+          minimum: 100
+          description: Amount in minor currency units (paise for INR). Minimum ₹1.00.
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          default: INR
+        description:
+          type: string
+          maxLength: 255
+        success_url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: Browser is redirected here with ?session_id=cs_<hex> on successful payment.
+        cancel_url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: Browser is redirected here with ?session_id=cs_<hex> on cancellation or expiry.
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+          description: Up to 20 key-value pairs stored and returned as-is. Never logged.
+
+    CheckoutSession:
+      type: object
+      additionalProperties: false
+      required: [session_id, checkout_url, amount, currency, status, expires_at, created_at]
+      properties:
+        session_id:
+          type: string
+          description: "cs_<32 hex>"
+        checkout_url:
+          type: string
+          format: uri
+          description: Open this URL in the customer's browser immediately. Valid until expires_at.
+        amount:         { type: integer, format: int64 }
+        currency:       { type: string }
+        description:    { type: [string, 'null'] }
+        status:
+          type: string
+          enum: [OPEN, PROCESSING, COMPLETED, EXPIRED, CANCELED]
+        intent_id:
+          type: [string, 'null']
+          description: "pi_<32 hex> of the payment intent created when the customer submits their card. Null until then."
+        success_url:    { type: string, format: uri }
+        cancel_url:     { type: string, format: uri }
+        metadata:       { type: object, additionalProperties: { type: string } }
+        expires_at:     { type: string, format: date-time }
+        created_at:     { type: string, format: date-time }
+
+    SubmitCheckoutPaymentRequest:
+      type: object
+      additionalProperties: false
+      required: [encrypted_card_data]
+      properties:
+        encrypted_card_data:
+          type: string
+          description: >-
+            RSA-OAEP SHA-256 ciphertext, base64-encoded, of the JSON object
+            {"pan":"<16 digits>","expiry":"YYYY-MM","cvv":"<3-4 digits>"}.
+            Encrypted to the key returned by GET /v1/checkout/key. The Synapse JS SDK
+            (synapse.js) encrypts automatically; custom integrations must do the same.
+
+    # ── 1.18.0 schemas ──────────────────────────────────────────────────────────
+    ApiKey:
+      type: object
+      additionalProperties: false
+      required: [key_id, prefix, created_at]
+      properties:
+        key_id:     { type: string, format: uuid }
+        prefix:     { type: string, description: "First 12 characters of the key (e.g. sk_live_xK3p), for identification only." }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: [string, 'null'], format: date-time }
+
+    ApiKeyCreated:
+      type: object
+      additionalProperties: false
+      required: [key_id, prefix, secret_key, created_at]
+      properties:
+        key_id:     { type: string, format: uuid }
+        prefix:     { type: string }
+        secret_key: { type: string, description: "The full key. Shown exactly once; store it immediately." }
+        created_at: { type: string, format: date-time }
+
+    Settlement:
+      type: object
+      additionalProperties: false
+      required: [settlement_id, transaction_id, currency, gross_amount, mdr_fee, gst_on_fee, net_amount, settled_at]
+      properties:
+        settlement_id:  { type: string, format: uuid }
+        transaction_id: { type: string, format: uuid }
+        currency:       { type: string, minLength: 3, maxLength: 3 }
+        gross_amount:   { type: integer, format: int64, description: "What the customer paid, in minor units." }
+        mdr_fee:        { type: integer, format: int64, description: "Merchant Discount Rate deducted by the platform." }
+        gst_on_fee:     { type: integer, format: int64, description: "18% GST on mdr_fee (derived; not a separate ledger posting yet)." }
+        net_amount:     { type: integer, format: int64, description: "gross_amount − mdr_fee − gst_on_fee." }
+        settled_at:     { type: string, format: date-time }
+
+    RiskHold:
+      type: object
+      additionalProperties: false
+      required: [hold_id, merchant_id, reason, required_documents, status, created_at]
+      properties:
+        hold_id:            { type: string, format: uuid }
+        merchant_id:        { type: string, format: uuid }
+        transaction_id:     { type: [string, 'null'], format: uuid, description: "Null for account-level holds." }
+        reason:
+          type: string
+          enum: [VELOCITY_BREACH, DOCUMENT_REQUIRED, AML_REVIEW, SANCTIONS_HIT, MANUAL_REVIEW]
+        required_documents:
+          type: array
+          items: { type: string }
+          description: "Document types the merchant must upload to release the hold, e.g. [\"PAN\", \"GST_CERTIFICATE\"]."
+        status:
+          type: string
+          enum: [OPEN, REVIEWING, RELEASED, ESCALATED]
+        created_at:   { type: string, format: date-time }
+        resolved_at:  { type: [string, 'null'], format: date-time }
 
     OfflineDetails:
       type: object

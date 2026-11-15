@@ -90,6 +90,9 @@ def create_app(cfg: EdgeConfig, now: Callable[[], datetime] = lambda: datetime.n
                                      "idempotency_key was already used with a different request body", "VALIDATION_ERROR")
                     return JSONResponse(status_code=200, content=_response(req, existing["offline_reference"],
                                                                            existing["created_at"]))
+                if rules.subscription_required:  # its limits are 0 too; say the real reason, not "limit exceeded"
+                    conn.execute("COMMIT")
+                    return error(422, "SUBSCRIPTION_REQUIRED", "Subscription required", "HARD_DECLINE")
                 if req.amount > rules.offline_limits.per_transaction:
                     conn.execute("COMMIT")
                     return error(422, "OFFLINE_LIMIT_EXCEEDED",

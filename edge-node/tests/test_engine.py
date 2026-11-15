@@ -120,6 +120,18 @@ def test_expired_rules_refuse_offline_payments(api, cfg, clock):
     assert queued(cfg) == []
 
 
+def test_a_merchant_without_a_plan_is_told_a_subscription_is_required(api, cfg, cloud, clock):
+    conn = db.connect(cfg.db_path)
+    rules = cloud.signed_rules(rules_version=2, subscription_required="SUBSCRIPTION_REQUIRED",
+                               offline_limits={"per_transaction": 0, "per_day": 0, "max_age_minutes": 4320})
+    accept(conn, rules, cfg, clock())
+    conn.close()
+    r = api.post(URL, json=request(cfg, amount=1))
+    assert (r.status_code, r.json()["error_code"], r.json()["error_message"]) == (
+        422, "SUBSCRIPTION_REQUIRED", "Subscription required")
+    assert queued(cfg) == []
+
+
 def test_only_this_merchants_terminals(api, cfg):
     assert api.post(URL, json=request(cfg, terminal="TERM-9")).status_code == 403
     assert api.post(URL, json={**request(cfg), "merchant_id": "other"}).status_code == 403

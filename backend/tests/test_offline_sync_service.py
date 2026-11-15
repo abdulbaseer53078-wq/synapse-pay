@@ -123,6 +123,43 @@ def test_a_rail_refusal_is_this_items_outcome_not_the_batch_failure():
 
     assert [r["status"] for r in results] == ["FAILED", "FAILED"]
     assert results[0]["reason"] == "INVALID_REQUEST"
+    assert results[0]["error"]["error_code"] == "INVALID_REQUEST" and results[0]["error"]["retryable"] is False
+
+
+def test_a_sale_stamped_in_the_future_is_refused_beyond_five_minutes():
+    # Flaw #4: a future local_timestamp would open an empty rolling-24h window and a fresh daily allowance.
+    service, engine, private = _service()
+    skewed, future = _item(private, age_hours=-4 / 60), _item(private, age_hours=-6 / 60)
+
+    results = service.sync(TERMINAL, [skewed, future])
+
+    assert results[0]["status"] == "PENDING"  # a terminal clock a few minutes fast is tolerated
+    assert results[1]["reason"] == "OFFLINE_TIMESTAMP_INVALID" and len(engine.created) == 1
+
+
+def test_results_carry_the_spec_error_so_the_edge_knows_what_to_resend():
+    # Flaw #7: the edge retries only on error.retryable (spec 1.14.0); `reason` alone made every refusal final.
+    from app.application.methods import AdapterUnavailable
+
+    service, _, private = _service()
+
+    class Unavailable(FakeEngine):
+        def create(self, caller_terminal, body):
+            raise AdapterUnavailable("card service unavailable")
+
+    class Declining(FakeEngine):
+        def create(self, caller_terminal, body):
+            return {"transaction_id": f"txn_{uuid4().hex}", "status": "FAILED",
+                    "error": {"error_code": "HOST_TIMEOUT", "error_message": "reversed",
+                              "error_category": "SYSTEM_ERROR", "retryable": True}}
+
+    service.engine = Unavailable()
+    [unavailable] = service.sync(TERMINAL, [_item(private)])
+    service.engine = Declining()
+    [reversed_timeout] = service.sync(TERMINAL, [_item(private)])
+
+    assert unavailable["status"] == "FAILED" and unavailable["error"]["retryable"] is True
+    assert reversed_timeout["error"]["error_code"] == "HOST_TIMEOUT" and reversed_timeout["error"]["retryable"]
 
 
 # --- the route -------------------------------------------------------------------------------------------

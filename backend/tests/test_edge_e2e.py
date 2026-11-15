@@ -65,6 +65,9 @@ def stack(settings, db, ready, merchant, auth, tmp_path):
         "offline_limits": {"per_transaction": 200_000, "per_day": 1_000_000}})
     assert r.status_code == 201, r.text
     edge_id = r.json()["edge_node_id"]
+    paid = cloud.post("/api/v1/subscriptions/upgrade", headers=auth(sub="admin-ops-1", scope="registry:admin"),
+                      json={"merchant_id": str(merchant)})  # offline payments need a paid plan
+    assert paid.status_code == 200, paid.text
     cfg = EdgeConfig(edge_node_id=edge_id, merchant_id=str(merchant), db_path=tmp_path / "edge.db",
                      cloud_url="https://unused", rules_public_key_pem=r.json()["rules_public_key_pem"],
                      signing_key_pem=private(edge_key))

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from psycopg import Connection
@@ -207,6 +207,16 @@ class PostgresTransactionRepository:
                 " WHERE k.state = 'IN_FLIGHT' AND t.status = 'INITIATED'"
                 " AND k.created_at < now() - make_interval(secs => %s)"
                 " ORDER BY k.created_at LIMIT %s", (older_than_seconds, limit)).fetchall()
+
+    def purge_done_keys(self, older_than: timedelta, limit: int = 1000) -> int:
+        """Deletes up to `limit` finished keys older than `older_than`; a retry after that is a new payment. Never
+        IN_FLIGHT ones: the stuck-key sweep resolves those. Batched, so one call never holds a long lock."""
+        with self.pool.connection() as conn:
+            return conn.execute(
+                "DELETE FROM idempotency_keys WHERE (merchant_id, idempotency_key) IN ("
+                " SELECT merchant_id, idempotency_key FROM idempotency_keys"
+                " WHERE state = 'DONE' AND created_at < now() - %s ORDER BY created_at LIMIT %s)",
+                (older_than, limit)).rowcount
 
     def finish(self, transaction_id: UUID, terminal_id: UUID, result: MethodResult | None, status: str,
                error: dict | None, store_response: bool, attempts: list[dict] | None = None,

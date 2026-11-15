@@ -74,13 +74,27 @@ class Settings:
         if ca_backend not in ("file", "aws_pca"):
             raise ValueError(f"CA_BACKEND must be file or aws_pca, not {ca_backend!r}")
         # The file CA needs its key and CRL paths; with AWS Private CA they don't exist.
-        ca_path = (lambda name: Path(os.environ[name])) if ca_backend == "file" else (lambda name: Path(""))
+        def _require_path(name: str) -> Path:
+            val = os.environ.get(name)
+            if not val:
+                raise SystemExit(
+                    f"\nMissing required env var: {name}\n"
+                    "Run the dev setup script to generate local keys and start the server:\n"
+                    "  .\\run_dev.ps1\n"
+                    "Or generate keys manually:\n"
+                    "  python backend/scripts/generate_dev_keys.py\n"
+                    "then set the environment variables shown in run_dev.ps1."
+                )
+            return Path(val)
+
+        ca_path = _require_path if ca_backend == "file" else (lambda name: Path(""))
+        jwt_key_path = _require_path("JWT_PUBLIC_KEY_PATH")
         return cls(
             database_url=os.environ["DATABASE_URL"],
             ca_cert_path=ca_path("CA_CERT_PATH"),
             ca_key_path=ca_path("CA_KEY_PATH"),
             ca_crl_path=ca_path("CA_CRL_PATH"),
-            jwt_public_key=Path(os.environ["JWT_PUBLIC_KEY_PATH"]).read_text(),
+            jwt_public_key=jwt_key_path.read_text(),
             approved_models={name: re.compile(pattern) for name, pattern in models.items()},
             card_service_url=os.environ.get("CARD_SERVICE_URL", "http://127.0.0.1:7070"),
             upi_psp_url=os.environ.get("UPI_PSP_URL", "http://127.0.0.1:8080"),

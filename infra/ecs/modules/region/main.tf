@@ -44,6 +44,11 @@ variable "database_url_secret_arn" {
   description = "Secrets Manager secret holding this region's DATABASE_URL"
 }
 
+variable "reversal_database_url_secret_arn" {
+  type        = string
+  description = "Secrets Manager secret holding card-service's own database URL (REVERSAL_DATABASE_URL): owed reversals, card-free outside the sandbox"
+}
+
 variable "kafka_bootstrap_servers" {
   type        = string
   description = "This region's Kafka brokers"
@@ -118,7 +123,7 @@ data "aws_region" "current" {}
 locals {
   log_group  = "/synapsepay/${var.name}"
   slots      = { for i in range(var.card_service_instances) : tostring(i) => var.stan_offset + i }
-  all_secret = concat([var.database_url_secret_arn], values(var.api_secrets), values(var.card_service_secrets), values(var.gateway_secrets))
+  all_secret = concat([var.database_url_secret_arn, var.reversal_database_url_secret_arn], values(var.api_secrets), values(var.card_service_secrets), values(var.gateway_secrets))
 
   api_environment = merge(var.api_environment, {
     CARD_SERVICE_URL        = "http://127.0.0.1:7070"
@@ -127,6 +132,8 @@ locals {
     KAFKA_BOOTSTRAP_SERVERS = var.kafka_bootstrap_servers
   })
   api_secrets = merge(var.api_secrets, { DATABASE_URL = var.database_url_secret_arn })
+  # Its own database, not the API's: the card-data-path sidecar gets no main-database credentials.
+  card_secrets = merge(var.card_service_secrets, { REVERSAL_DATABASE_URL = var.reversal_database_url_secret_arn })
 
   logs = {
     logDriver = "awslogs"
@@ -141,7 +148,7 @@ locals {
 # ECS wants [{name, value}] / [{name, valueFrom}] lists, not maps.
 locals {
   env     = { for k, m in { api = local.api_environment, card = var.card_service_environment } : k => [for n, v in m : { name = n, value = v }] }
-  secrets = { for k, m in { api = local.api_secrets, card = var.card_service_secrets, gateway = var.gateway_secrets } : k => [for n, v in m : { name = n, valueFrom = v }] }
+  secrets = { for k, m in { api = local.api_secrets, card = local.card_secrets, gateway = var.gateway_secrets } : k => [for n, v in m : { name = n, valueFrom = v }] }
 }
 
 resource "aws_cloudwatch_log_group" "app" {
@@ -277,6 +284,55 @@ resource "aws_lb_listener" "api" {
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.api.arn
+  }
+}
+
+# Flaw #1: the backend trusts these headers as identity because Envoy sets them from a verified client certificate.
+# Envoy reaches the API over localhost, never through this ALB, so arriving here they can only be forged: refuse
+# the request. /internal/* (Envoy's ext_authz, the edge API) is likewise only for Envoy.
+locals {
+  gateway_only_headers = ["x-terminal-id", "x-edge-node-id", "x-forwarded-client-cert"]
+  gateway_only_refusal = jsonencode({
+    error_code     = "FORBIDDEN", error_message = "terminal and edge identities are only accepted through the mTLS gateway",
+    error_category = "AUTHENTICATION_ERROR", retryable = false
+  })
+}
+
+resource "aws_lb_listener_rule" "refuse_gateway_headers" {
+  for_each     = { for i, header in local.gateway_only_headers : header => i }
+  listener_arn = aws_lb_listener.api.arn
+  priority     = each.value + 1
+  action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "application/json"
+      status_code  = "403"
+      message_body = local.gateway_only_refusal
+    }
+  }
+  condition {
+    http_header {
+      http_header_name = each.key
+      values           = ["*"] # present at all; the backend also ignores an empty or non-UUID value
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "refuse_internal_paths" {
+  listener_arn = aws_lb_listener.api.arn
+  priority     = length(local.gateway_only_headers) + 1
+  action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "application/json"
+      status_code  = "403"
+      message_body = local.gateway_only_refusal
+    }
+  }
+  condition {
+    path_pattern {
+      values = ["/internal/*"]
+    }
   }
 }
 

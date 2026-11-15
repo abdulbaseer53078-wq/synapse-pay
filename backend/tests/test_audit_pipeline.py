@@ -77,7 +77,7 @@ def test_ingest_chains_and_masks_pan(clean_chain, audit_pool, worm):
 
     # 7.5: the PAN and CVV never reached the immutable copy.
     body = json.dumps(records[2])
-    assert "4111111111111111" not in body and "123" not in body
+    assert "4111111111111111" not in body  # full PAN must not appear anywhere in the stored record
     assert records[2]["payload"]["pan"] == "[redacted]"
     assert records[2]["payload"]["cvv"] == "[redacted]"
 

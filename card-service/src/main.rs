@@ -3,7 +3,7 @@
 //! | Variable | Meaning |
 //! | --- | --- |
 //! | `CARD_SERVICE_ADDR` | listen address, default `127.0.0.1:7070` (loopback only: see `http`) |
-//! | `SIM_HSM_BDK_HEX` | simulated HSM base key, 32 or 64 hex chars (TEST KEY ONLY) |
+//! | `SIM_HSM_BDK_HEX` | simulated HSM base key, 32 or 64 hex chars; the repo's public test key is refused unless `CARD_DATA_STORAGE=sandbox` |
 //! | `SIM_HSM_CHECKOUT_KEY` | PKCS#8 PEM file with the P-256 checkout key browsers encrypt to; generated (and lost on restart) if unset |
 //! | `HOSTS` | comma-separated acquirer IDs to run as a fleet, e.g. `acquirer_a,acquirer_b`. Empty: single-host mode |
 //! | `ACQUIRER_ID` | the host's ID in single-host mode, default `acquirer_a` |
@@ -139,7 +139,12 @@ async fn main() {
             p256::SecretKey::random(&mut rand_core::OsRng)
         }
     };
-    let hsm = SimHsm::from_hex(&var("SIM_HSM_BDK_HEX")).unwrap_or_else(|e| fail(&e)).with_checkout_key(checkout);
+    let bdk = var("SIM_HSM_BDK_HEX");
+    if !card_storage && card_service::hsm::is_public_test_bdk(&bdk) {
+        fail("SIM_HSM_BDK_HEX is the public test key from this repository: refusing to start outside the sandbox \
+              (set CARD_DATA_STORAGE=sandbox for local and test runs only)");
+    }
+    let hsm = SimHsm::from_hex(&bdk).unwrap_or_else(|e| fail(&e)).with_checkout_key(checkout);
     let audit_file = std::fs::OpenOptions::new().create(true).append(true).open(var("AUDIT_LOG_PATH"))
         .unwrap_or_else(|e| fail(&format!("AUDIT_LOG_PATH: {e}")));
     let audit: Arc<dyn AuditSink> = Arc::new(JsonLines::new(audit_file));
@@ -201,13 +206,16 @@ async fn main() {
     };
     let vault = store.map(|store| Arc::new(Vault { store, hsm: hsm.clone(), network_tokens }));
     eprintln!("card-service: token vault {}", if vault.is_some() { "on" } else { "off" });
-    // PR 3: owed reversals outlive the request, in the same private database. Without it they are only logged.
-    let reversals = match env::var("VAULT_DATABASE_URL") {
+    // PR 3: owed reversals outlive the request. Flaw #3: outside the sandbox the queue still runs, but F-16 keeps
+    // card data out of it, so rows are card-free MANUAL records for a person; only the sandbox resends them.
+    let reversals = match env::var("REVERSAL_DATABASE_URL").or_else(|_| env::var("VAULT_DATABASE_URL")) {
         Ok(url) => {
-            let queue = ReversalQueue::connect(&url, hsm.clone(), fleet.clone(), timeouts.reversal).await
-                .unwrap_or_else(|e| fail(&format!("reversal queue database: {e}")));
+            let queue = ReversalQueue::connect(&url, hsm.clone(), fleet.clone(), timeouts.reversal, card_storage)
+                .await.unwrap_or_else(|e| fail(&format!("reversal queue database: {e}")));
             let queue = Arc::new(queue);
-            tokio::spawn(queue.clone().run(Duration::from_millis(number("REVERSAL_RETRY_MS", 10_000))));
+            if card_storage {
+                tokio::spawn(queue.clone().run(Duration::from_millis(number("REVERSAL_RETRY_MS", 10_000))));
+            }
             Some(queue)
         }
         Err(_) => None,

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Synapse Pay — API Keys</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50">
+
+<div class="flex min-h-screen">
+  <div id="sidebar-mount"></div>
+  <main class="ml-56 flex-1 p-8">
+    <div class="flex items-center justify-between mb-6">
+      <h1 class="text-2xl font-bold text-gray-900">API Keys</h1>
+      <button id="gen-btn"
+              class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
+        Generate Live Key
+      </button>
+    </div>
+
+    <!-- KYC warning: shown when KYC is not approved -->
+    <div id="kyc-warn" class="hidden mb-4 p-4 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
+      KYC not approved — live key generation is disabled.
+      <a href="kyc.html" class="underline font-medium ml-1">Complete KYC</a>
+    </div>
+
+    <!-- One-time key reveal -->
+    <div id="new-key-box" class="hidden mb-4 p-4 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
+      <div class="font-semibold mb-1">Live key generated — copy it now, it will not be shown again.</div>
+      <code id="new-key-val" class="break-all font-mono text-green-900"></code>
+    </div>
+
+    <p id="msg" class="mb-3 text-sm text-red-600 hidden"></p>
+
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b border-gray-100">
+          <tr>
+            <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Prefix</th>
+            <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Created</th>
+            <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+            <th class="px-4 py-3"></th>
+          </tr>
+        </thead>
+        <tbody id="tbody" class="divide-y divide-gray-50">
+          <tr><td colspan="4" class="text-center py-8 text-gray-400">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+</div>
+
+<script src="_nav.js"></script>
+<script>
+  requireAuth();
+  renderSidebar("api_keys.html");
+
+  async function loadKeys() {
+    const res = await apiFetch("/api/v1/api-keys");
+    if (!res || !res.ok) return;
+    const { items } = await res.json();
+    renderTable(items);
+  }
+
+  function renderTable(items) {
+    const tbody = document.getElementById("tbody");
+    if (!items.length) {
+      tbody.innerHTML = `<tr><td colspan="4" class="text-center py-8 text-gray-400">No API keys yet.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = items.map(k => {
+      const active = !k.revoked_at;
+      const badge = active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500";
+      const label = active ? "Active" : "Revoked";
+      const revBtn = active
+        ? `<button onclick="revoke('${k.key_id}')" class="text-red-500 hover:text-red-700 text-xs font-medium">Revoke</button>`
+        : "";
+      return `
+        <tr class="hover:bg-gray-50">
+          <td class="px-4 py-3 font-mono text-gray-900">${k.prefix}…</td>
+          <td class="px-4 py-3 text-gray-500">${new Date(k.created_at).toLocaleDateString("en-IN")}</td>
+          <td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${badge}">${label}</span></td>
+          <td class="px-4 py-3 text-right">${revBtn}</td>
+        </tr>`;
+    }).join("");
+  }
+
+  async function revoke(keyId) {
+    if (!confirm("Revoke this key? Apps using it will stop working immediately.")) return;
+    const res = await apiFetch(`/api/v1/api-keys/${keyId}`, { method: "DELETE" });
+    if (res && (res.ok || res.status === 204)) loadKeys();
+    else showMsg("Failed to revoke key.");
+  }
+
+  async function generate() {
+    const btn = document.getElementById("gen-btn");
+    btn.disabled = true;
+    const res = await apiFetch("/api/v1/api-keys", { method: "POST" });
+    if (!res) { showMsg("Network error."); btn.disabled = false; return; }
+    if (res.status === 400) {
+      const data = await res.json();
+      if (data.error_code === "KYC_REQUIRED") {
+        document.getElementById("kyc-warn").classList.remove("hidden");
+        btn.disabled = false;
+        return;
+      }
+    }
+    if (res.ok) {
+      const { secret_key } = await res.json();
+      document.getElementById("new-key-val").textContent = secret_key;
+      document.getElementById("new-key-box").classList.remove("hidden");
+      loadKeys();
+    } else {
+      showMsg("Could not generate key.");
+    }
+    btn.disabled = false;
+  }
+
+  function showMsg(text) {
+    const el = document.getElementById("msg");
+    el.textContent = text;
+    el.classList.remove("hidden");
+    setTimeout(() => el.classList.add("hidden"), 4000);
+  }
+
+  // Check KYC status to decide whether to show warning on load.
+  async function checkKyc() {
+    const res = await apiFetch("/api/v1/kyc/status");
+    if (res && res.ok) {
+      const { status } = await res.json();
+      if (status !== "APPROVED") document.getElementById("kyc-warn").classList.remove("hidden");
+    }
+  }
+
+  document.getElementById("gen-btn").addEventListener("click", generate);
+
+  loadKeys();
+  checkKyc();
+</script>
+</body>
+</html>

@@ -107,7 +107,7 @@ def _status(db, transaction_id):
 def test_1_a_double_clicked_refund_refunds_once(client, db, pool, service, upi):
     merchant_id, transaction_id = _payment(db, pool)
     client.app.state.refunds = service
-    key = client.app.state.api_keys.create(merchant_id)
+    key, _ = client.app.state.api_keys.create(merchant_id)
     headers = {"Authorization": f"Bearer {key}", "Idempotency-Key": str(uuid4())}
     url = f"/api/v1/transactions/{public_id(transaction_id)}/refund"
 
@@ -127,7 +127,7 @@ def test_1_a_double_clicked_refund_refunds_once(client, db, pool, service, upi):
 def test_2_an_over_refund_is_refused_and_records_nothing(client, db, pool, service):
     merchant_id, transaction_id = _payment(db, pool)
     client.app.state.refunds = service
-    key = client.app.state.api_keys.create(merchant_id)
+    key, _ = client.app.state.api_keys.create(merchant_id)
     r = client.post(f"/api/v1/transactions/{public_id(transaction_id)}/refund", json={"amount": 150_000},
                     headers={"Authorization": f"Bearer {key}", "Idempotency-Key": str(uuid4())})
     assert r.status_code == 400 and r.json()["error_code"] == "REFUND_EXCEEDS_AMOUNT", r.text
@@ -263,7 +263,7 @@ def test_merchants_only_reach_their_own_payments_and_rails_that_can_do_it(client
     merchant_id, transaction_id = _payment(db, pool)
     stranger, _ = _payment(db, pool)
     client.app.state.refunds = service
-    key = client.app.state.api_keys.create(stranger)
+    key, _ = client.app.state.api_keys.create(stranger)
     url = f"/api/v1/transactions/{public_id(transaction_id)}/refund"
     r = client.post(url, json={"amount": 100}, headers={"Authorization": f"Bearer {key}", "Idempotency-Key": str(uuid4())})
     assert r.status_code == 404, "another merchant's payment looks like no payment"

@@ -55,8 +55,12 @@ def with_scope_or_terminal(scope: str):
 
     def dependency(request: Request, x_terminal_id: str | None = Header(default=None),
                    creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> dict | None:
-        if x_terminal_id is not None:
+        # Only a terminal UUID counts: an empty value, or the gateway's "-" for an edge node, falls through to OAuth.
+        try:
+            UUID(x_terminal_id or "")
             return None
+        except ValueError:
+            pass
         claims = _claims(request, creds)
         if scope not in claims.get("scope", "").split():
             raise Forbidden(f"access token lacks the {scope} scope")

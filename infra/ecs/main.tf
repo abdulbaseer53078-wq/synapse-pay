@@ -39,40 +39,42 @@ variable "card_service_instances_per_region" {
 variable "primary" {
   description = "The active region (e.g. ap-south-1): its network, certificate, database, Kafka and secrets."
   type = object({
-    aws_region               = string
-    vpc_id                   = string
-    public_subnet_ids        = list(string)
-    private_subnet_ids       = list(string)
-    certificate_arn          = string
-    database_url_secret_arn  = string
-    kafka_bootstrap_servers  = string
-    workers_desired          = number
-    api_environment          = optional(map(string), {})
-    api_secrets              = optional(map(string), {})
-    card_service_environment = optional(map(string), {})
-    card_service_secrets     = optional(map(string), {})
-    gateway_secrets          = map(string)
-    task_role_policy_arns    = optional(list(string), [])
+    aws_region                       = string
+    vpc_id                           = string
+    public_subnet_ids                = list(string)
+    private_subnet_ids               = list(string)
+    certificate_arn                  = string
+    database_url_secret_arn          = string
+    reversal_database_url_secret_arn = string
+    kafka_bootstrap_servers          = string
+    workers_desired                  = number
+    api_environment                  = optional(map(string), {})
+    api_secrets                      = optional(map(string), {})
+    card_service_environment         = optional(map(string), {})
+    card_service_secrets             = optional(map(string), {})
+    gateway_secrets                  = map(string)
+    task_role_policy_arns            = optional(list(string), [])
   })
 }
 
 variable "secondary" {
   description = "The standby region (e.g. ap-south-2), set up the same way; workers_desired = 0 until promoted."
   type = object({
-    aws_region               = string
-    vpc_id                   = string
-    public_subnet_ids        = list(string)
-    private_subnet_ids       = list(string)
-    certificate_arn          = string
-    database_url_secret_arn  = string
-    kafka_bootstrap_servers  = string
-    workers_desired          = number
-    api_environment          = optional(map(string), {})
-    api_secrets              = optional(map(string), {})
-    card_service_environment = optional(map(string), {})
-    card_service_secrets     = optional(map(string), {})
-    gateway_secrets          = map(string)
-    task_role_policy_arns    = optional(list(string), [])
+    aws_region                       = string
+    vpc_id                           = string
+    public_subnet_ids                = list(string)
+    private_subnet_ids               = list(string)
+    certificate_arn                  = string
+    database_url_secret_arn          = string
+    reversal_database_url_secret_arn = string
+    kafka_bootstrap_servers          = string
+    workers_desired                  = number
+    api_environment                  = optional(map(string), {})
+    api_secrets                      = optional(map(string), {})
+    card_service_environment         = optional(map(string), {})
+    card_service_secrets             = optional(map(string), {})
+    gateway_secrets                  = map(string)
+    task_role_policy_arns            = optional(list(string), [])
   })
 }
 
@@ -95,52 +97,54 @@ module "primary" {
   source    = "./modules/region"
   providers = { aws = aws.primary }
 
-  name                     = "synapsepay-${var.primary.aws_region}"
-  images                   = var.images
-  terminal_ca_arn          = var.terminal_ca_arn
-  terminal_crl_url         = var.terminal_crl_url
-  card_service_instances   = local.per_region
-  stan_offset              = 0
-  stan_instances           = local.stan_instances
-  vpc_id                   = var.primary.vpc_id
-  public_subnet_ids        = var.primary.public_subnet_ids
-  private_subnet_ids       = var.primary.private_subnet_ids
-  certificate_arn          = var.primary.certificate_arn
-  database_url_secret_arn  = var.primary.database_url_secret_arn
-  kafka_bootstrap_servers  = var.primary.kafka_bootstrap_servers
-  workers_desired          = var.primary.workers_desired
-  api_environment          = var.primary.api_environment
-  api_secrets              = var.primary.api_secrets
-  card_service_environment = var.primary.card_service_environment
-  card_service_secrets     = var.primary.card_service_secrets
-  gateway_secrets          = var.primary.gateway_secrets
-  task_role_policy_arns    = var.primary.task_role_policy_arns
+  name                             = "synapsepay-${var.primary.aws_region}"
+  images                           = var.images
+  terminal_ca_arn                  = var.terminal_ca_arn
+  terminal_crl_url                 = var.terminal_crl_url
+  card_service_instances           = local.per_region
+  stan_offset                      = 0
+  stan_instances                   = local.stan_instances
+  vpc_id                           = var.primary.vpc_id
+  public_subnet_ids                = var.primary.public_subnet_ids
+  private_subnet_ids               = var.primary.private_subnet_ids
+  certificate_arn                  = var.primary.certificate_arn
+  database_url_secret_arn          = var.primary.database_url_secret_arn
+  reversal_database_url_secret_arn = var.primary.reversal_database_url_secret_arn
+  kafka_bootstrap_servers          = var.primary.kafka_bootstrap_servers
+  workers_desired                  = var.primary.workers_desired
+  api_environment                  = var.primary.api_environment
+  api_secrets                      = var.primary.api_secrets
+  card_service_environment         = var.primary.card_service_environment
+  card_service_secrets             = var.primary.card_service_secrets
+  gateway_secrets                  = var.primary.gateway_secrets
+  task_role_policy_arns            = var.primary.task_role_policy_arns
 }
 
 module "secondary" {
   source    = "./modules/region"
   providers = { aws = aws.secondary }
 
-  name                     = "synapsepay-${var.secondary.aws_region}"
-  images                   = var.images
-  terminal_ca_arn          = var.terminal_ca_arn
-  terminal_crl_url         = var.terminal_crl_url
-  card_service_instances   = local.per_region
-  stan_offset              = local.per_region # slots after the primary's: no STAN is ever minted twice
-  stan_instances           = local.stan_instances
-  vpc_id                   = var.secondary.vpc_id
-  public_subnet_ids        = var.secondary.public_subnet_ids
-  private_subnet_ids       = var.secondary.private_subnet_ids
-  certificate_arn          = var.secondary.certificate_arn
-  database_url_secret_arn  = var.secondary.database_url_secret_arn
-  kafka_bootstrap_servers  = var.secondary.kafka_bootstrap_servers
-  workers_desired          = var.secondary.workers_desired
-  api_environment          = var.secondary.api_environment
-  api_secrets              = var.secondary.api_secrets
-  card_service_environment = var.secondary.card_service_environment
-  card_service_secrets     = var.secondary.card_service_secrets
-  gateway_secrets          = var.secondary.gateway_secrets
-  task_role_policy_arns    = var.secondary.task_role_policy_arns
+  name                             = "synapsepay-${var.secondary.aws_region}"
+  images                           = var.images
+  terminal_ca_arn                  = var.terminal_ca_arn
+  terminal_crl_url                 = var.terminal_crl_url
+  card_service_instances           = local.per_region
+  stan_offset                      = local.per_region # slots after the primary's: no STAN is ever minted twice
+  stan_instances                   = local.stan_instances
+  vpc_id                           = var.secondary.vpc_id
+  public_subnet_ids                = var.secondary.public_subnet_ids
+  private_subnet_ids               = var.secondary.private_subnet_ids
+  certificate_arn                  = var.secondary.certificate_arn
+  database_url_secret_arn          = var.secondary.database_url_secret_arn
+  reversal_database_url_secret_arn = var.secondary.reversal_database_url_secret_arn
+  kafka_bootstrap_servers          = var.secondary.kafka_bootstrap_servers
+  workers_desired                  = var.secondary.workers_desired
+  api_environment                  = var.secondary.api_environment
+  api_secrets                      = var.secondary.api_secrets
+  card_service_environment         = var.secondary.card_service_environment
+  card_service_secrets             = var.secondary.card_service_secrets
+  gateway_secrets                  = var.secondary.gateway_secrets
+  task_role_policy_arns            = var.secondary.task_role_policy_arns
 }
 
 output "load_balancers" {

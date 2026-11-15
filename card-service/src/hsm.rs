@@ -393,11 +393,26 @@ pub fn format0_pin_block(pin: &str, pan: &str) -> [u8; 8] {
     block
 }
 
+/// The public test BDK (16- or 32-byte form). It is committed in this repo and its docs, so anything it protects is
+/// readable by anyone with a clone; startup refuses it outside the sandbox.
+pub fn is_public_test_bdk(hex: &str) -> bool {
+    const TEST_BDK: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    let hex = hex.trim().to_ascii_lowercase();
+    hex == TEST_BDK || hex == TEST_BDK[..32]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const PAN: &str = "4111111111111111";
+
+    #[test]
+    fn the_public_test_bdk_is_recognised_in_any_case_and_length() {
+        assert!(is_public_test_bdk("000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F\n"));
+        assert!(is_public_test_bdk("000102030405060708090a0b0c0d0e0f"));
+        assert!(!is_public_test_bdk("8f3a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d"));
+    }
 
     fn hsm() -> SimHsm {
         SimHsm::from_hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f").unwrap()

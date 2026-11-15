@@ -26,4 +26,7 @@ CREATE TABLE IF NOT EXISTS pending_reversals (
     CHECK ((state = 'PENDING') = (sealed_pan IS NOT NULL))
 );
 
+-- Flaw #3: outside the sandbox (F-16) a row is written straight to MANUAL with no card data, expiry included.
+ALTER TABLE pending_reversals ALTER COLUMN card_expiry DROP NOT NULL;
+
 CREATE INDEX IF NOT EXISTS pending_reversals_due ON pending_reversals (created_at) WHERE state = 'PENDING';

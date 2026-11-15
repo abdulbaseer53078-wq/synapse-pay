@@ -40,11 +40,37 @@ def csr() -> str:
 
 
 @pytest.fixture
-def edge(edge_client, auth, merchant):
+def free_edge(edge_client, auth, merchant):
     r = edge_client.post("/api/v1/edge-nodes", headers=auth(sub=ADMIN, scope="registry:admin"),
                          json={"merchant_id": str(merchant), "csr_pem": csr(), "offline_limits": LIMITS})
     assert r.status_code == 201, r.text
     return r.json()
+
+
+def upgrade(client, auth, merchant):
+    r = client.post("/api/v1/subscriptions/upgrade", headers=auth(sub=ADMIN, scope="registry:admin"),
+                    json={"merchant_id": str(merchant)})
+    assert r.status_code == 200, r.text
+
+
+@pytest.fixture
+def edge(free_edge, edge_client, auth, merchant):
+    """An edge whose merchant is on PRO: offline payments need a paid plan."""
+    upgrade(edge_client, auth, merchant)
+    return free_edge
+
+
+def test_a_free_merchants_edge_is_offered_no_offline_allowance_until_it_upgrades(free_edge, edge_client, auth,
+                                                                                    merchant, db):
+    before = rules(edge_client, free_edge["edge_node_id"]).json()
+    upgrade(edge_client, auth, merchant)
+    after = rules(edge_client, free_edge["edge_node_id"]).json()
+
+    assert before["offline_limits"]["per_transaction"] == 0 and before["subscription_required"] == "SUBSCRIPTION_REQUIRED"
+    assert after["offline_limits"]["per_transaction"] == LIMITS["per_transaction"]
+    assert "subscription_required" not in after
+    assert db.execute("SELECT count(*) FROM audit_log WHERE entity_type = 'merchant_subscription'"
+                      " AND entity_id = %s AND actor_id = %s", (merchant, ADMIN)).fetchone()[0] == 1
 
 
 def rules(client, edge_node_id):

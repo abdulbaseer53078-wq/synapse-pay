@@ -1,0 +1,23 @@
+........................................................................ [ 22%]
+sssssssss............................................................... [ 44%]
+........................................................................ [ 67%]
+........................................................................ [ 89%]
+.................................                                        [100%]
+============================== warnings summary ===============================
+.venv\Lib\site-packages\fastapi\testclient.py:1
+  C:\Users\Abdul\Downloads\synapse-pay\backend\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============================ slowest 10 durations =============================
+9.60s setup    tests/test_transactions_e2e.py::test_undecryptable_card_is_rejected_end_to_end
+9.45s setup    tests/test_transactions.py::test_per_day_limit_declines
+9.38s setup    tests/test_transactions_e2e.py::test_card_number_never_leaves_the_card_service
+9.38s setup    tests/test_transactions_e2e.py::test_pin_payment_over_5000_rupees
+9.34s setup    tests/test_transactions.py::test_same_key_different_body_is_409
+9.32s setup    tests/test_transactions.py::test_unhealthy_terminal_is_declined
+9.24s setup    tests/test_transactions_e2e.py::test_approval_end_to_end
+9.23s setup    tests/test_transactions.py::test_failed_transactions_dont_count_toward_the_daily_limit
+9.16s setup    tests/test_transactions_e2e.py::test_host_timeout_is_reversed_end_to_end
+9.11s setup    tests/test_transactions_e2e.py::test_p95_latency_under_2_seconds
+312 passed, 9 skipped, 1 warning in 675.63s (0:11:15)

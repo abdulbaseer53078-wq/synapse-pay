@@ -5,11 +5,16 @@ __pycache__/
 target/
 *.key
 *-key.pem
+dev_*.pem
+dev_*.crt
+dev_*.crl
+card-service-audit.jsonl
 graphify-out/
 .sandbox/
 node_modules/
 audit-worm/
 .verify-worm/
 observability/pagerduty_routing_key
-# pytest scratch dirs, when TMP points inside the repo
-pytest-of-*/
+# Gradle build caches — never commit these; they can contain encoded secrets
+.gradle/
+**/.gradle/

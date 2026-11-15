@@ -158,6 +158,23 @@ class PostgresRefunds:
         with self.pool.connection() as conn:
             return _select(conn, "r.refund_id = %s AND r.merchant_id = %s", (refund_id, merchant_id))
 
+    def list_for_transaction(self, transaction_id: UUID, merchant_id: UUID) -> list[dict]:
+        """Refunds on one transaction. Raises NotFound if the transaction belongs to a different merchant."""
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT refund_id, amount, reason, status, created_at, updated_at"
+                " FROM refunds WHERE transaction_id = %s AND merchant_id = %s ORDER BY created_at DESC",
+                (transaction_id, merchant_id),
+            ).fetchall()
+            if not rows:
+                # distinguish "no refunds yet" from "not your transaction"
+                exists = conn.execute("SELECT 1 FROM transactions WHERE transaction_id = %s AND merchant_id = %s",
+                                      (transaction_id, merchant_id)).fetchone()
+                if exists is None:
+                    raise NotFound("transaction not found", code="TRANSACTION_NOT_FOUND")
+        return [{"refund_id": f"rfnd_{r[0].hex}", "amount": r[1], "reason": r[2], "status": r[3],
+                 "created_at": r[4].isoformat(), "updated_at": r[5].isoformat()} for r in rows]
+
     def payment(self, merchant_id: UUID, transaction_id: UUID) -> tuple | None:
         """(status, amount, payment_method, method_reference, terminal_id) of the merchant's own payment only:
         another merchant's id answers like an unknown one."""

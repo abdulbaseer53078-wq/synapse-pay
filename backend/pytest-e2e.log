@@ -1,0 +1,24 @@
+============================= test session starts =============================
+platform win32 -- Python 3.14.3, pytest-9.2.0, pluggy-1.7.0 -- C:\Users\Abdul\Downloads\synapse-pay\backend\.venv\Scripts\python.exe
+rootdir: C:\Users\Abdul\Downloads\synapse-pay\backend
+configfile: pytest.ini
+plugins: anyio-4.16.0
+collecting ... collected 9 items
+
+tests/test_transactions_e2e.py::test_approval_end_to_end PASSED          [ 11%]
+tests/test_transactions_e2e.py::test_decline_end_to_end PASSED           [ 22%]
+tests/test_transactions_e2e.py::test_pin_payment_over_5000_rupees PASSED [ 33%]
+tests/test_transactions_e2e.py::test_host_timeout_is_reversed_end_to_end PASSED [ 44%]
+tests/test_transactions_e2e.py::test_undecryptable_card_is_rejected_end_to_end PASSED [ 55%]
+tests/test_transactions_e2e.py::test_p95_latency_under_2_seconds PASSED  [ 66%]
+tests/test_transactions_e2e.py::test_card_number_never_leaves_the_card_service PASSED [ 77%]
+tests/test_cascade_e2e.py::test_a_soft_decline_cascades_and_the_audit_records_both_hosts PASSED [ 88%]
+tests/test_cascade_e2e.py::test_a_soft_decline_cascades_across_two_real_acquirers PASSED [100%]
+
+============================== warnings summary ===============================
+.venv\Lib\site-packages\fastapi\testclient.py:1
+  C:\Users\Abdul\Downloads\synapse-pay\backend\.venv\Lib\site-packages\fastapi\testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=================== 9 passed, 1 warning in 89.48s (0:01:29) ===================

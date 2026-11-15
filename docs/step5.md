@@ -84,7 +84,7 @@ cd card-service && cargo test
 
 ```bash
 cd card-service
-SIM_HSM_BDK_HEX=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f \
+CARD_DATA_STORAGE=sandbox SIM_HSM_BDK_HEX=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f \
 HOST_ADDR=127.0.0.1:9000 HOST_SERVER_NAME=localhost \
 HOST_CA=ca.pem HOST_CLIENT_CERT=client.pem HOST_CLIENT_KEY=client-key.pem \
 HOST_DIALECT=../iso8583/dialects/synthetic-host.json AUDIT_LOG_PATH=iso-audit.jsonl \

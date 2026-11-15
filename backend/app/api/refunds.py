@@ -45,6 +45,12 @@ def _view(refund) -> dict:
     return body
 
 
+@router.get("/api/v1/transactions/{transaction_id}/refunds")
+def list_refunds(transaction_id: str, merchant: UUID = Depends(merchant_from_api_key),
+                 service: RefundService = Depends(_service)) -> dict:
+    return {"items": service.store.list_for_transaction(_transaction(transaction_id), merchant)}
+
+
 @router.post("/api/v1/transactions/{transaction_id}/refund")
 def refund(transaction_id: str, body: RefundBody, idempotency_key: str | None = Header(default=None),
            merchant: UUID = Depends(merchant_from_api_key), service: RefundService = Depends(_service)) -> JSONResponse:
