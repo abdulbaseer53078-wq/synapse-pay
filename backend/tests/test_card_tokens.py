@@ -45,7 +45,7 @@ def shop(settings, db, cards):
     with TestClient(create_app(settings, cards=cards)) as client:
         merchant = uuid4()
         db.execute("INSERT INTO merchants (merchant_id) VALUES (%s)", (merchant,))
-        key = client.app.state.api_keys.create(merchant)
+        key, _ = client.app.state.api_keys.create(merchant)
         yield client, merchant, {"Authorization": f"Bearer {key}"}
 
 

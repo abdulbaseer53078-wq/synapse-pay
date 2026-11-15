@@ -135,7 +135,7 @@ def test_the_card_service_client_sends_the_trace_id_header():
 
 
 def test_recovery_stats_count_what_failover_saved_for_this_merchant_only(routed_client, ready, merchant, cards, db):
-    key = routed_client.app.state.api_keys.create(merchant)
+    key, _ = routed_client.app.state.api_keys.create(merchant)
     stats = lambda k=key: routed_client.get("/api/v1/merchants/me/recovery-stats",  # noqa: E731
                                             headers={"Authorization": f"Bearer {k}"})
     assert stats().json()["cascaded"] == 0
@@ -147,7 +147,7 @@ def test_recovery_stats_count_what_failover_saved_for_this_merchant_only(routed_
     assert body["recovered_amount"] == [{"currency": "INR", "amount": 50_000}]
 
     (other,) = db.execute("INSERT INTO merchants DEFAULT VALUES RETURNING merchant_id").fetchone()
-    assert stats(routed_client.app.state.api_keys.create(other)).json()["cascaded"] == 0, "merchant-scoped"
+    assert stats(routed_client.app.state.api_keys.create(other)[0]).json()["cascaded"] == 0, "merchant-scoped"
     assert stats("sk_test_nope").status_code == 401
     assert routed_client.get("/api/v1/merchants/me/recovery-stats?days=91",
                              headers={"Authorization": f"Bearer {key}"}).status_code == 400

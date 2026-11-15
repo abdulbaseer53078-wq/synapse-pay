@@ -210,8 +210,8 @@ def test_the_merchant_sees_its_chargeback_and_defends_it_once_before_the_deadlin
     stranger, _ = _sale(db, pool, "RRN100000011")
     cb = send("", _opened("RRN100000010", case="CB-10")).json()["chargeback_id"]
     late = send("", _opened("RRN100000011", case="CB-11", deadline_days=-1)).json()["chargeback_id"]
-    key = {"Authorization": f"Bearer {client.app.state.api_keys.create(merchant)}"}
-    other = {"Authorization": f"Bearer {client.app.state.api_keys.create(stranger)}"}
+    key = {"Authorization": f"Bearer {client.app.state.api_keys.create(merchant)[0]}"}
+    other = {"Authorization": f"Bearer {client.app.state.api_keys.create(stranger)[0]}"}
 
     seen = client.get(f"/api/v1/chargebacks/{cb}", headers=key).json()
     assert (seen["status"], seen["transaction_id"], seen["reason_code"]) == ("PENDING", public_id(payment), "10.4")

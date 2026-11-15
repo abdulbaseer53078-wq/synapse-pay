@@ -130,8 +130,9 @@ def test_finished_keys_are_purged_after_the_retention_window_and_in_flight_ones_
     assert key_state(db, old_in_flight) == "IN_FLIGHT", "the stuck-key sweep owns in-flight keys"
 
     # The stalled request wakes up after the sweep: it must not send the payment it no longer owns.
+    sweep_stuck_keys(repo)  # fails old_in_flight (IN_FLIGHT key, INITIATED transaction, 8 days old)
     with pytest.raises(TransactionSuperseded):
-        repo.mark_pending(stuck, terminal_id)
+        repo.mark_pending(old_in_flight, terminal_id)
 
 
 class Reversals:
