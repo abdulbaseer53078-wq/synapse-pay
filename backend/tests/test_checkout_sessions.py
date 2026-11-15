@@ -64,7 +64,7 @@ class FakeCheckoutSessions:
         row["status"] = "PROCESSING"
         return True
 
-    def complete(self, session_id_str: str) -> None:
+    def complete(self, session_id_str: str, **_) -> None:
         self._rows[session_id_str]["status"] = "COMPLETED"
 
     def reopen(self, session_id_str: str) -> None:

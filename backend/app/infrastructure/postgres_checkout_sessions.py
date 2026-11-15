@@ -5,6 +5,8 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from app.infrastructure.postgres_transactions import _audit_entity
+
 
 def _base_url() -> str:
     return os.environ.get("CHECKOUT_BASE_URL", "http://localhost:3000")
@@ -73,11 +75,15 @@ class PostgresCheckoutSessions:
             ).fetchone()
         return row is not None
 
-    def complete(self, session_id_str: str) -> None:
+    def complete(self, session_id_str: str, merchant_id: UUID, amount: int) -> None:
         session_id = UUID(session_id_str.removeprefix("cs_"))
-        with self.pool.connection() as conn:
+        with self.pool.connection() as conn, conn.transaction():
             conn.execute("UPDATE checkout_sessions SET status = 'COMPLETED', updated_at = now()"
                          " WHERE session_id = %s", (session_id,))
+            # entity_type uses lowercase to match the codebase convention (see: transaction, refund, payment_intent).
+            _audit_entity(conn, "SYSTEM", None, "checkout_payment", session_id,
+                          "checkout_payment.complete", "PROCESSING", "COMPLETED",
+                          payload={"merchant_id": str(merchant_id), "amount": amount})
 
     def reopen(self, session_id_str: str) -> None:
         """Card declined or service error: return to OPEN so the customer can retry."""

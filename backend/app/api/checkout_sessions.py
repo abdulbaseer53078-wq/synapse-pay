@@ -79,7 +79,7 @@ def pay_session(session_id: str, body: PayBody, request: Request) -> dict | JSON
         raise
 
     if result.status == "APPROVED":
-        sessions.complete(session_id)
+        sessions.complete(session_id, merchant_id=session["merchant_id"], amount=session["amount"])
         return {"status": "APPROVED", "success_url": session["success_url"]}
 
     sessions.reopen(session_id)
