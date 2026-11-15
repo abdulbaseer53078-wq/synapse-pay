@@ -19,7 +19,8 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.application.methods import (AdapterUnavailable, CapabilityDescriptor, DisputeRules, MethodRequest,
-                                     MethodResult, Transition, WebhookRejected, WebhookRequest, WebhookUpdate)
+                                     MethodResult, OutcomeUnknown, Transition, WebhookRejected, WebhookRequest,
+                                     WebhookUpdate)
 from app.infrastructure.methods.base import BaseMethodAdapter
 from app.infrastructure.webhook_signature import REPLAY_WINDOW_SECONDS, verify_signature
 
@@ -49,9 +50,17 @@ WALLET_CAPABILITIES = CapabilityDescriptor(
 
 
 class WalletUnavailable(Exception):
-    """We could not ask the provider: transport, timeout or 5xx. Nothing is known, so nothing is declined."""
+    """Connect-side failure; nothing was sent — safe to free the idempotency key."""
 
     def __init__(self, message: str = "the wallet provider is unavailable; nothing was charged"):
+        super().__init__(message)
+        self.message = message
+
+
+class WalletSentNoAnswer(Exception):
+    """The request reached the network but no response came back; payment outcome is unknown."""
+
+    def __init__(self, message: str = "the wallet provider did not answer; outcome unknown"):
         super().__init__(message)
         self.message = message
 
@@ -96,11 +105,14 @@ class HttpWallet:
         try:
             response = self.client.post("/wallet/v1/pay", json={
                 "amount": amount, "currency": currency, "merchant_transaction_id": merchant_transaction_id})
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
+        except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError) as exc:
             raise WalletUnavailable(
                 f"the wallet provider did not answer ({type(exc).__name__}); nothing was charged") from exc
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise WalletSentNoAnswer(
+                f"the wallet provider did not answer ({type(exc).__name__}); outcome unknown") from exc
         if response.status_code >= 500:
-            raise WalletUnavailable(f"the wallet provider answered {response.status_code}; nothing was confirmed")
+            raise WalletSentNoAnswer(f"the wallet provider answered {response.status_code}; outcome unknown")
         if response.status_code >= 400:
             raise self._declined(response)
         return response.json()
@@ -110,21 +122,30 @@ class HttpWallet:
             response = self.client.post("/wallet/v1/debit", json={
                 "wallet_token": wallet_token, "amount": amount, "currency": currency,
                 "merchant_transaction_id": merchant_transaction_id})
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
+        except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError) as exc:
             raise WalletUnavailable(
                 f"the wallet provider did not answer ({type(exc).__name__}); nothing was charged") from exc
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise WalletSentNoAnswer(
+                f"the wallet provider did not answer ({type(exc).__name__}); outcome unknown") from exc
         if response.status_code >= 500:
-            raise WalletUnavailable(f"the wallet provider answered {response.status_code}; nothing was confirmed")
+            raise WalletSentNoAnswer(f"the wallet provider answered {response.status_code}; outcome unknown")
         if response.status_code >= 400:
             raise self._declined(response)
         try:
             return response.json()
         except ValueError as exc:
-            raise WalletUnavailable("the wallet provider answered something that is not JSON") from exc
+            raise WalletSentNoAnswer("the wallet provider answered a non-JSON body; outcome unknown") from exc
 
     def status(self, wallet_transaction_id: str) -> dict:
+        return self._get_status(f"/wallet/v1/status/{wallet_transaction_id}")
+
+    def status_by_merchant_id(self, merchant_transaction_id: str) -> dict:
+        return self._get_status(f"/wallet/v1/status/merchant/{merchant_transaction_id}")
+
+    def _get_status(self, path: str) -> dict:
         try:
-            response = self.client.get(f"/wallet/v1/status/{wallet_transaction_id}")
+            response = self.client.get(path)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             raise WalletUnavailable(f"the wallet provider did not answer ({type(exc).__name__})") from exc
         if response.status_code >= 400:
@@ -147,7 +168,10 @@ class WalletMethodAdapter(BaseMethodAdapter):
     method = "WALLET"
     CAPABILITIES = WALLET_CAPABILITIES
     DETAILS = WalletDetails
-    ERROR_MAP = {WalletUnavailable: lambda exc: AdapterUnavailable(exc.message)}
+    ERROR_MAP = {
+        WalletUnavailable: lambda exc: AdapterUnavailable(exc.message),
+        WalletSentNoAnswer: lambda exc: OutcomeUnknown(exc.message),
+    }
 
     def __init__(self, provider: HttpWallet, webhook_secret: str | None = None, clock=time.time,
                  replay_window: int = REPLAY_WINDOW_SECONDS):
@@ -203,9 +227,15 @@ class WalletMethodAdapter(BaseMethodAdapter):
     def status(self, transaction_id, reference: str | None = None) -> MethodResult:
         from app.application.methods import UnsupportedOperation
         if not reference:
-            raise UnsupportedOperation("WALLET status needs the provider reference stored with the transaction")
+            status_fn = getattr(self.provider, "status_by_merchant_id", None)
+            if status_fn is None:
+                raise UnsupportedOperation("WALLET status needs the provider reference stored with the transaction")
+            lookup = str(transaction_id)
+        else:
+            status_fn = self.provider.status
+            lookup = reference
         try:
-            reply = self.provider.status(reference)
+            reply = status_fn(lookup)
         except WalletDeclined as declined:
             return MethodResult(status="FAILED", error={
                 "error_code": declined.code, "error_message": declined.message,

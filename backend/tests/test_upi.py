@@ -13,7 +13,7 @@ from app.application.methods import (CapabilityDescriptor, InvalidMethodDetails,
                                      MethodResult, UnsupportedOperation)
 from app.application.transactions import Claim, TransactionService
 from app.infrastructure.methods.upi import UPI_CAPABILITIES, UpiMethodAdapter
-from app.infrastructure.upi_client import HttpUpiPsp, PspDeclined, PspUnavailable
+from app.infrastructure.upi_client import HttpUpiPsp, PspDeclined, PspSentNoAnswer, PspUnavailable
 
 ROOT = Path(__file__).parents[2]
 TERMINAL, MERCHANT = uuid4(), uuid4()
@@ -128,6 +128,56 @@ def test_transport_failure_is_retryable_and_never_a_decline():
         UpiMethodAdapter(Down()).initiate(_request())
 
 
+def test_connect_timeout_on_collect_frees_the_key():
+    """PspUnavailable (connect-side) = not sent; the idempotency key is safe to free."""
+    class ConnectDown(FakePsp):
+        def collect(self, **_kwargs):
+            raise PspUnavailable("the UPI PSP did not answer (ConnectTimeout); nothing was sent")
+
+    from app.application.methods import AdapterUnavailable
+    with pytest.raises(AdapterUnavailable):
+        UpiMethodAdapter(ConnectDown()).initiate(_request())
+
+
+def test_read_timeout_on_collect_is_outcome_unknown():
+    """PspSentNoAnswer (read-side) = request reached the network; the idempotency key must be held."""
+    class ReadDown(FakePsp):
+        def collect(self, **_kwargs):
+            raise PspSentNoAnswer("the UPI PSP did not answer (ReadTimeout); outcome unknown")
+
+    from app.application.methods import OutcomeUnknown
+    with pytest.raises(OutcomeUnknown):
+        UpiMethodAdapter(ReadDown()).initiate(_request())
+
+
+def test_psp_5xx_on_collect_is_outcome_unknown():
+    """A 5xx on a POST: the request reached the PSP; the idempotency key must be held."""
+    class ServerError(FakePsp):
+        def collect(self, **_kwargs):
+            raise PspSentNoAnswer("the UPI PSP answered 503; outcome unknown")
+
+    from app.application.methods import OutcomeUnknown
+    with pytest.raises(OutcomeUnknown):
+        UpiMethodAdapter(ServerError()).initiate(_request())
+
+
+def test_engine_holds_key_on_outcome_unknown():
+    """The engine must store the response (key held) when outcome is unknown."""
+    class ReadDown(FakePsp):
+        def collect(self, **_kwargs):
+            raise PspSentNoAnswer("the UPI PSP did not answer (ReadTimeout); outcome unknown")
+
+    repo = _Repo()
+    service = TransactionService(repo, _Auth(), MethodRegistry([UpiMethodAdapter(ReadDown())]))
+    body = {"idempotency_key": str(uuid4()), "amount": 1500, "currency": "INR", "payment_method": "UPI",
+            "method_details": dict(VPA), "terminal_id": str(TERMINAL), "merchant_id": str(MERCHANT)}
+
+    response = service.create(TERMINAL, body)
+
+    assert response["status"] == "PENDING"
+    assert repo.finished[0]["stored"] is True, "key must be held: a retry must not create a second collect"
+
+
 def test_intent_and_mandate_flows_are_not_implemented_yet():
     for flow in ("INTENT", "MANDATE"):
         details = {"vpa": "asha@okhdfcbank", "flow_type": flow}
@@ -152,6 +202,18 @@ def test_status_maps_the_psp_answer(psp_status, expected):
 def test_status_needs_the_stored_reference():
     with pytest.raises(UnsupportedOperation, match="reference"):
         UpiMethodAdapter(FakePsp()).status(uuid4())
+
+
+def test_status_falls_back_to_merchant_id_when_no_reference():
+    """A transaction stored PENDING with no PSP reference (OutcomeUnknown) can still be resolved by merchant id."""
+    class WithMerchantLookup(FakePsp):
+        def status_by_merchant_id(self, merchant_transaction_id):
+            return {"psp_transaction_id": "psp_recovered", "status": "SUCCESS", "rrn": "123456789012"}
+
+    tid = uuid4()
+    result = UpiMethodAdapter(WithMerchantLookup()).status(tid)
+    assert result.status == "SETTLED"
+    assert result.method_reference == "psp_recovered"
 
 
 def test_refund_uses_the_reference():

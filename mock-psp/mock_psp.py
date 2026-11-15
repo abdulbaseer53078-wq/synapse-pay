@@ -67,6 +67,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/mock/state":
             with _lock:
                 return self._send(200, {"collects": list(_collects.values())})
+        if self.path.startswith("/psp/v1/status/merchant/"):
+            merchant_id = self.path.rsplit("/", 1)[-1]
+            with _lock:
+                record = next((r for r in _collects.values() if r["merchant_transaction_id"] == merchant_id), None)
+            if record is None:
+                return self._send(404, {"error": {"code": "TRANSACTION_NOT_FOUND",
+                                                  "message": f"no such merchant_transaction_id: {merchant_id}"}})
+            return self._send(200, record)
         if self.path.startswith("/psp/v1/status/"):
             psp_id = self.path.rsplit("/", 1)[-1]
             with _lock:

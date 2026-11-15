@@ -21,10 +21,10 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.application.methods import (AdapterUnavailable, CapabilityDescriptor, DisputeRules, InvalidMethodDetails,
-                                     MethodRequest, MethodResult, Transition, UnsupportedOperation, WebhookRejected,
-                                     WebhookRequest, WebhookUpdate)
+                                     MethodRequest, MethodResult, OutcomeUnknown, Transition, UnsupportedOperation,
+                                     WebhookRejected, WebhookRequest, WebhookUpdate)
 from app.infrastructure.methods.base import BaseMethodAdapter
-from app.infrastructure.upi_client import PspDeclined, PspUnavailable
+from app.infrastructure.upi_client import PspDeclined, PspSentNoAnswer, PspUnavailable
 
 REPLAY_WINDOW_SECONDS = 300
 
@@ -95,7 +95,10 @@ class UpiMethodAdapter(BaseMethodAdapter):
     method = "UPI"
     CAPABILITIES = UPI_CAPABILITIES
     DETAILS = UpiDetails
-    ERROR_MAP = {PspUnavailable: lambda exc: AdapterUnavailable(exc.message)}
+    ERROR_MAP = {
+        PspUnavailable: lambda exc: AdapterUnavailable(exc.message),
+        PspSentNoAnswer: lambda exc: OutcomeUnknown(exc.message),
+    }
 
     def __init__(self, psp: UpiPsp, webhook_secret: str | None = None, clock=time.time,
                  replay_window: int = REPLAY_WINDOW_SECONDS):
@@ -132,9 +135,15 @@ class UpiMethodAdapter(BaseMethodAdapter):
 
     def status(self, transaction_id: UUID, reference: str | None = None) -> MethodResult:
         if not reference:
-            raise UnsupportedOperation("UPI status needs the PSP reference stored with the transaction")
+            status_fn = getattr(self.psp, "status_by_merchant_id", None)
+            if status_fn is None:
+                raise UnsupportedOperation("UPI status needs the PSP reference stored with the transaction")
+            lookup = str(transaction_id)
+        else:
+            status_fn = self.psp.status
+            lookup = reference
         try:
-            return _status_result(self.psp.status(reference))
+            return _status_result(status_fn(lookup))
         except PspDeclined as declined:
             return _failure(declined.code, declined.message, declined.category, declined.retryable)
 
