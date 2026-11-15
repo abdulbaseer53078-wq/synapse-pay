@@ -3,46 +3,46 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Synapse Checkout — Demo</title>
+  <title>Chai Corner · Checkout</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     body {
-      font-family: system-ui, sans-serif;
+      font-family: Inter, system-ui, sans-serif;
       min-height: 100vh;
       display: flex;
       align-items: center;
       justify-content: center;
-      background: #f5f5f7;
+      background: #f8fafc;
       margin: 0;
     }
     .demo-card {
       background: #fff;
-      border-radius: 16px;
+      border-radius: 8px;
+      border: 1px solid #e2e8f0;
       padding: 48px 40px;
       max-width: 400px;
       width: 90vw;
-      box-shadow: 0 4px 24px rgba(0,0,0,.10);
       text-align: center;
     }
-    .demo-card h1 { font-size: 22px; margin: 0 0 8px; color: #111; }
-    .demo-card p  { color: #666; margin: 0 0 32px; font-size: 15px; }
+    .demo-card h1 { font-size: 22px; margin: 0 0 8px; color: #0f172a; }
+    .demo-card p  { color: #64748b; margin: 0 0 32px; font-size: 15px; }
     .pay-btn {
-      background: #4f46e5;
+      background: #2563eb;
       color: #fff;
       border: none;
-      border-radius: 10px;
+      border-radius: 6px;
       padding: 14px 36px;
       font-size: 17px;
       font-weight: 600;
       cursor: pointer;
       transition: background .15s;
     }
-    .pay-btn:hover { background: #4338ca; }
-    .pay-btn:disabled { background: #a5b4fc; cursor: default; }
+    .pay-btn:hover { background: #1d4ed8; }
+    .pay-btn:disabled { background: #93c5fd; cursor: default; }
     #status {
       margin-top: 20px;
       font-size: 14px;
-      color: #666;
+      color: #64748b;
       min-height: 20px;
     }
   </style>
@@ -50,8 +50,8 @@
 <body>
 
 <div class="demo-card">
-  <h1>Demo Shop</h1>
-  <p>Order total: <strong>₹500.00</strong></p>
+  <h1>Chai Corner</h1>
+  <p>Masala chai × 10 · Order #1042<br>Total: <strong>₹500.00</strong></p>
   <button class="pay-btn" id="pay-btn">Pay ₹500</button>
   <div id="status"></div>
 </div>
@@ -94,7 +94,7 @@
         body: JSON.stringify({
           amount: 50000,          // ₹500.00 in minor units
           currency: "INR",
-          description: "Demo order",
+          description: "Chai Corner order #1042",
           success_url: window.location.origin + "?payment=success",
           cancel_url:  window.location.origin + "?payment=cancelled",
         }),

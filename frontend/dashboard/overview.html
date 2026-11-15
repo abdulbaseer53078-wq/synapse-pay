@@ -3,41 +3,58 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Synapse Pay — Overview</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <title>Overview · Synapse Pay</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script>tailwind.config = { theme: { extend: { fontFamily: { sans: ["Inter", "system-ui", "sans-serif"] } } } };</script>
 </head>
-<body class="bg-gray-50">
+<body class="bg-slate-50 font-sans text-slate-900 antialiased">
 
-<div class="flex min-h-screen">
-  <div id="sidebar-mount"></div>
-  <main class="ml-56 flex-1 p-8">
-    <h1 class="text-2xl font-bold text-gray-900 mb-6">Overview</h1>
+<div id="sidebar-mount"></div>
+<main class="md:ml-60">
+  <div class="mx-auto max-w-5xl px-4 py-8 md:px-10">
+    <header class="mb-6">
+      <h1 class="text-xl font-semibold tracking-tight">Overview</h1>
+      <p class="mt-1 text-sm text-slate-500">Settled volume and account health at a glance.</p>
+    </header>
 
-    <div id="stats" class="grid grid-cols-1 sm:grid-cols-3 gap-6">
-      <div class="stat-card bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-        <div class="text-sm text-gray-500 font-medium">Settlements</div>
-        <div id="stat-settlements" class="text-3xl font-bold text-gray-900 mt-2">—</div>
+    <div class="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-2 lg:grid-cols-4">
+      <div class="bg-white p-5">
+        <div class="text-sm text-slate-500">Gross volume settled</div>
+        <div id="stat-gross" class="mt-2 text-2xl font-semibold tabular-nums">—</div>
       </div>
-      <div class="stat-card bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-        <div class="text-sm text-gray-500 font-medium">Open Risk Holds</div>
-        <div id="stat-holds" class="text-3xl font-bold text-gray-900 mt-2">—</div>
+      <div class="bg-white p-5">
+        <div class="text-sm text-slate-500">Net paid out</div>
+        <div id="stat-net" class="mt-2 text-2xl font-semibold tabular-nums">—</div>
+        <div class="mt-1 text-xs text-slate-400">After MDR and GST</div>
       </div>
-      <div class="stat-card bg-white rounded-xl shadow-sm border border-gray-100 p-6">
-        <div class="text-sm text-gray-500 font-medium">Active API Keys</div>
-        <div id="stat-keys" class="text-3xl font-bold text-gray-900 mt-2">—</div>
+      <div class="bg-white p-5">
+        <div class="text-sm text-slate-500">Open risk holds</div>
+        <div id="stat-holds" class="mt-2 text-2xl font-semibold tabular-nums">—</div>
+      </div>
+      <div class="bg-white p-5">
+        <div class="text-sm text-slate-500">Active API keys</div>
+        <div id="stat-keys" class="mt-2 text-2xl font-semibold tabular-nums">—</div>
       </div>
     </div>
 
-    <p id="note" class="mt-4 text-xs text-gray-400 hidden">
-      Settlements and risk holds require a <code class="bg-gray-100 px-1 rounded">sk_live_</code> key.
+    <p id="note" class="mt-4 hidden text-sm text-slate-500">
+      Settlement and risk figures are only available with a <code class="rounded bg-slate-100 px-1 font-mono text-xs">sk_live_</code> key.
     </p>
-  </main>
-</div>
+  </div>
+</main>
 
 <script src="_nav.js"></script>
 <script>
   requireAuth();
   renderSidebar("overview.html");
+
+  function totals(items, field) {
+    const byCur = {};
+    items.forEach(s => { byCur[s.currency] = (byCur[s.currency] || 0) + s[field]; });
+    const parts = Object.entries(byCur).map(([cur, v]) => fmt(v, cur));
+    return parts.length ? parts.join(" · ") : fmt(0);
+  }
 
   async function load() {
     const [keysRes, settlRes, riskRes] = await Promise.all([
@@ -48,23 +65,20 @@
 
     if (keysRes && keysRes.ok) {
       const { items } = await keysRes.json();
-      document.getElementById("stat-keys").textContent =
-        items.filter(k => !k.revoked_at).length;
+      document.getElementById("stat-keys").textContent = items.filter(k => !k.revoked_at).length;
     }
 
     if (settlRes && settlRes.ok) {
       const { items } = await settlRes.json();
-      document.getElementById("stat-settlements").textContent = items.length;
+      document.getElementById("stat-gross").textContent = totals(items, "gross_amount");
+      document.getElementById("stat-net").textContent = totals(items, "net_amount");
     } else {
-      document.getElementById("stat-settlements").textContent = "—";
       document.getElementById("note").classList.remove("hidden");
     }
 
     if (riskRes && riskRes.ok) {
       const { holds } = await riskRes.json();
       document.getElementById("stat-holds").textContent = holds.length;
-    } else {
-      document.getElementById("stat-holds").textContent = "—";
     }
   }
 
