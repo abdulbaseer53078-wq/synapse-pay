@@ -17,13 +17,14 @@
 
 ## 📖 Overview
 
-Synapse Pay is a **payment gateway** (not an aggregator) built to compete with Razorpay and Stripe on three axes:
+Synapse Pay is a **production-grade payment orchestration engine** — a reference implementation that shows how the hard parts of card payments actually work:
 
-- **0% MDR** — merchants pay nothing per transaction; Synapse Pay earns revenue via SaaS subscriptions.
-- **Radical transparency** — itemized settlement breakdowns (gross / MDR / GST / net), clear risk-hold reasons, and a hash-chained audit log.
-- **Offline-first edge nodes** — physical stores keep taking card payments during ISP outages; transactions are cryptographically signed, hash-chained, and reconciled automatically.
+- **ISO 8583 over mTLS** — a Rust host-connector formats and signs real acquiring messages; a software HSM derives per-card keys via HKDF/AES-GCM.
+- **Idempotent cascade routing** — if psp_1 times out, the engine queues a durable reversal before failing over to psp_2, so the customer is never double-charged.
+- **Offline-first edge nodes** — POS terminals keep processing during ISP outages; rules are signed by the cloud, local transactions are hash-chained, and sync is idempotent on reconnect.
+- **Hash-chained audit log** — every payment state change is chained and written to append-only WORM storage; a verifier detects any tampering or gap.
 
-Unlike traditional gateways, Synapse Pay **never holds or pools merchant funds** — it routes card data to the acquiring bank and steps out of the way, keeping it out of the heaviest regulatory tier.
+The architecture is multi-language by design: **Python (FastAPI)** for orchestration and merchant APIs, **Rust** for the cryptographic core and ISO 8583 parsing, and **Envoy** for zero-trust mTLS at the perimeter. It is a sandbox — all acquirers, banks, and the HSM are simulated — but the patterns, the failure handling, and the code are the real thing.
 
 > **Status:** sandbox only. All acquirers, banks and the HSM are simulated.
 
