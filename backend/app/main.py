@@ -16,6 +16,8 @@ from app.api import card_tokens as card_tokens_api
 from app.api import chargebacks as chargebacks_api
 from app.api import reconciliation as reconciliation_api
 from app.api import refunds as refunds_api
+from app.api import risk as risk_api
+from app.api import settlements as settlements_api
 from app.api import subscriptions as subscriptions_api
 from app.api import certifications as certifications_api
 from app.api import (audit, capabilities, edge, errors, gateway, merchants, payment_intents, region, terminals,
@@ -68,6 +70,8 @@ from app.infrastructure.postgres_terminals import PostgresTerminalRepository
 from app.infrastructure.postgres_edge import PostgresEdgeNodes
 from app.infrastructure.postgres_edge_chain import PostgresEdgeChain
 from app.infrastructure.rules_signer import EcdsaRulesSigner
+from app.infrastructure.postgres_risk import PostgresRisk
+from app.infrastructure.postgres_settlements import PostgresSettlements
 from app.infrastructure.postgres_subscriptions import PostgresSubscriptions
 from app.infrastructure.postgres_transactions import PostgresTransactionRepository
 from app.infrastructure.postgres_webhooks import PostgresWebhookEvents
@@ -227,6 +231,8 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.state.intents = PaymentIntentService(PostgresIntentRepository(pool, ConfigFeePolicy(settings.fee_bps)), cards)
     app.state.card_tokens = CardTokenService(cards)  # Step 29: the vault is card-service's; this only relays
     app.state.api_keys = PostgresApiKeys(pool)
+    app.state.settlements = PostgresSettlements(pool)
+    app.state.risk = PostgresRisk(pool)
     app.state.recovery = PostgresRecoveryStats(pool)
     app.state.webhooks = webhooks
     app.state.allow_insecure_webhooks = settings.allow_insecure_webhooks
@@ -254,6 +260,8 @@ def create_app(settings: Settings | None = None, cards: CheckoutCardProcessor | 
     app.include_router(refunds_api.router)
     app.include_router(subscriptions_api.router)
     app.include_router(reconciliation_api.router)
+    app.include_router(settlements_api.router)
+    app.include_router(risk_api.router)
     app.include_router(chargebacks_api.router)
     app.include_router(certification_runs_api.router)
     app.include_router(edge.router)
