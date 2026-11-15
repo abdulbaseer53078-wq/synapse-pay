@@ -1,6 +1,6 @@
 # One-click dev server for Synapse Pay (Windows / PowerShell 7+)
 # Usage: .\run_dev.ps1
-# Requires: Docker Desktop, Python 3.11+, psql (Postgres client) in PATH
+# Requires: Docker Desktop, Python 3.11+
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -23,11 +23,11 @@ Write-Host "`n[2/4] Starting Postgres …" -ForegroundColor Cyan
 docker compose up -d db
 if ($LASTEXITCODE -ne 0) { Write-Error "docker compose failed. Is Docker Desktop running?"; exit 1 }
 
-# Wait until Postgres accepts connections (up to 30 s)
-$env:PGPASSWORD = "postgres"
+# Wait until Postgres accepts connections inside the container (up to 30 s)
+$DB_CONTAINER = "synapse-pay-db-1"
 $ready = $false
 for ($i = 0; $i -lt 30; $i++) {
-    $result = psql -h localhost -U postgres -c "SELECT 1" -q 2>$null
+    docker exec $DB_CONTAINER psql -U postgres -c "SELECT 1" -q 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) { $ready = $true; break }
     Start-Sleep -Seconds 1
 }
@@ -36,10 +36,11 @@ Write-Host "  Postgres is up." -ForegroundColor Green
 
 # ── 3. Create DB and apply migrations ────────────────────────────────────────
 Write-Host "`n[3/4] Applying migrations …" -ForegroundColor Cyan
-psql -h localhost -U postgres -c "CREATE DATABASE $DB_NAME;" 2>$null  # ignore "already exists"
+# ignore "already exists" error
+docker exec $DB_CONTAINER psql -U postgres -c "CREATE DATABASE $DB_NAME;" 2>$null
 Get-ChildItem "$PSScriptRoot\db\migrations\*.sql" | Sort-Object Name | ForEach-Object {
     Write-Host "  applying $($_.Name) …"
-    psql -h localhost -U postgres -d $DB_NAME -f $_.FullName -q
+    Get-Content $_.FullName | docker exec -i $DB_CONTAINER psql -U postgres -d $DB_NAME -q
     if ($LASTEXITCODE -ne 0) { Write-Error "Migration $($_.Name) failed."; exit 1 }
 }
 Write-Host "  Migrations applied." -ForegroundColor Green
@@ -54,7 +55,6 @@ $env:CA_CRL_PATH             = "$BACKEND\dev_ca.crl"
 $env:JWT_PUBLIC_KEY_PATH     = "$BACKEND\dev_jwt_pub.pem"
 $env:CHECKOUT_BASE_URL       = "http://localhost:8000/api"
 $env:ALLOW_INSECURE_WEBHOOKS = "1"
-$env:PGPASSWORD              = ""   # clear — no longer needed
 
 Set-Location $BACKEND
 & .\.venv\Scripts\uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000 --reload
